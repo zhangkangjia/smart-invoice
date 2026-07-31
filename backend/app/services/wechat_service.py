@@ -1,10 +1,8 @@
 """微信服务号 & 企业微信集成服务。
 
 支持能力：
-1. 客户通过微信服务号提交开票请求（H5页面）
-2. 开票完成后推送模板消息通知客户
-3. 企业微信应用消息通知代账人员
-4. 微信回调签名验证
+1. 微信服务号：客户通过公众号提交开票请求、接收模板消息通知
+2. 企业微信：作为自建应用嵌入工作台、OAuth免登录、消息通知
 """
 
 import hashlib
@@ -53,18 +51,15 @@ class WeChatService:
             data = resp.json()
 
         if "access_token" not in data:
-            errcode = data.get("errcode", -1)
-            errmsg = data.get("errmsg", "unknown")
-            logger.error("获取微信access_token失败: %s %s", errcode, errmsg)
-            raise RuntimeError(f"微信获取access_token失败: {errmsg}")
+            logger.error("获取微信access_token失败: %s", data)
+            raise RuntimeError(f"微信获取access_token失败: {data.get('errmsg')}")
 
         self._access_token = data["access_token"]
         self._token_expires = time.time() + data.get("expires_in", 7200)
-        logger.info("微信access_token已刷新，有效期%ds", data.get("expires_in", 7200))
         return self._access_token
 
-    def verify_signature(self, signature: str, timestamp: str, nonce: str, echostr: str = "") -> bool:
-        """验证微信服务器签名（用于公众号服务器配置校验）。"""
+    def verify_signature(self, signature: str, timestamp: str, nonce: str) -> bool:
+        """验证微信服务器签名。"""
         token = settings.WECHAT_TOKEN
         if not token:
             return False
@@ -78,24 +73,13 @@ class WeChatService:
         template_id: str,
         data: dict[str, dict[str, str]],
         url: str = "",
-        miniprogram: dict | None = None,
     ) -> bool:
-        """发送模板消息通知客户。
-
-        Args:
-            openid: 接收者的微信openid
-            template_id: 模板消息ID
-            data: 模板数据，如 {"first": {"value": "您的发票已开具"}, ...}
-            url: 点击跳转的URL
-            miniprogram: 小程序跳转参数
-        """
+        """发送服务号模板消息通知客户。"""
         if not self.enabled:
-            logger.warning("微信未配置，跳过模板消息发送")
             return False
 
         token = await self.get_access_token()
         url_api = f"{self.BASE_URL}/cgi-bin/message/template/send?access_token={token}"
-
         payload: dict[str, Any] = {
             "touser": openid,
             "template_id": template_id,
@@ -103,8 +87,6 @@ class WeChatService:
         }
         if url:
             payload["url"] = url
-        if miniprogram:
-            payload["miniprogram"] = miniprogram
 
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(url_api, json=payload)
@@ -113,36 +95,14 @@ class WeChatService:
         if result.get("errcode") == 0:
             logger.info("微信模板消息发送成功 openid=%s", openid)
             return True
-
         logger.error("微信模板消息发送失败: %s", result)
         return False
 
-    async def send_invoice_notification(
-        self,
-        openid: str,
-        enterprise_name: str,
-        invoice_number: str,
-        amount: str,
-        status: str,
-    ) -> bool:
-        """发送开票完成通知（需在公众号后台配置模板）。"""
-        template_id = ""  # 替换为实际模板ID
-        data = {
-            "first": {"value": f"您在{enterprise_name}的发票已处理完成"},
-            "keyword1": {"value": invoice_number or "—"},
-            "keyword2": {"value": amount},
-            "keyword3": {"value": status},
-            "remark": {"value": "点击查看发票详情"},
-        }
-        detail_url = f"{settings.FRONTEND_BASE_URL}/invoice/result?no={invoice_number}"
-        return await self.send_template_message(openid, template_id, data, url=detail_url)
-
     async def get_oauth_user_info(self, code: str) -> dict:
-        """通过OAuth授权码获取用户信息（网页授权）。"""
+        """通过OAuth授权码获取用户信息。"""
         if not self.enabled:
             raise RuntimeError("微信服务号未配置")
 
-        # 第一步：用code换取access_token和openid
         url = f"{self.BASE_URL}/sns/oauth2/access_token"
         params = {
             "appid": self.app_id,
@@ -155,20 +115,17 @@ class WeChatService:
             token_data = resp.json()
 
         if "openid" not in token_data:
-            logger.error("微信OAuth失败: %s", token_data)
             return {}
 
-        openid = token_data["openid"]
-        access_token = token_data["access_token"]
-
-        # 第二步：拉取用户信息
         url = f"{self.BASE_URL}/sns/userinfo"
-        params = {"access_token": access_token, "openid": openid, "lang": "zh_CN"}
+        params = {
+            "access_token": token_data["access_token"],
+            "openid": token_data["openid"],
+            "lang": "zh_CN",
+        }
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(url, params=params)
-            user_info = resp.json()
-
-        return user_info
+            return resp.json()
 
     def build_oauth_url(self, redirect_uri: str, scope: str = "snsapi_base", state: str = "") -> str:
         """构造网页授权URL。"""
@@ -177,16 +134,23 @@ class WeChatService:
         if not self.enabled:
             return ""
         encoded_uri = quote(redirect_uri, safe="")
-        url = (
+        return (
             f"https://open.weixin.qq.com/connect/oauth2/authorize"
             f"?appid={self.app_id}&redirect_uri={encoded_uri}&response_type=code"
             f"&scope={scope}&state={state}#wechat_redirect"
         )
-        return url
 
 
 class WeComService:
-    """企业微信 API 封装（内部通知代账人员）。"""
+    """企业微信 API 封装。
+
+    核心能力：
+    1. 自建应用免登录（OAuth code 换取 userid）
+    2. 应用消息推送（文本/Markdown）
+    3. 通讯录同步（部门、成员）
+    4. JS-SDK 签名（用于在企业微信内嵌H5）
+    5. 工作台应用配置
+    """
 
     BASE_URL = "https://qyapi.weixin.qq.com/cgi-bin"
 
@@ -202,7 +166,7 @@ class WeComService:
         return bool(self.corp_id and self.secret)
 
     async def get_access_token(self) -> str:
-        """获取企业微信 access_token。"""
+        """获取企业微信 access_token（带缓存）。"""
         if self._access_token and time.time() < self._token_expires - 300:
             return self._access_token
 
@@ -223,51 +187,94 @@ class WeComService:
         self._token_expires = time.time() + data.get("expires_in", 7200)
         return self._access_token
 
-    async def send_text_message(self, user_ids: str, content: str) -> bool:
-        """发送文本消息给指定用户（@user_ids 逗号分隔）。"""
+    # ===== OAuth 免登录 =====
+
+    async def get_user_id_by_code(self, code: str) -> str:
+        """通过OAuth code换取企业微信userid（免登录核心）。
+
+        流程：
+        1. 前端在企业微信中打开自建应用URL，自动带上 code 参数
+        2. 后端用 code 调此接口换取 userid
+        3. 根据 userid 查找本地账号，自动登录
+        """
         if not self.enabled:
-            logger.warning("企业微信未配置，跳过消息发送")
-            return False
+            raise RuntimeError("企业微信未配置")
 
         token = await self.get_access_token()
-        url = f"{self.BASE_URL}/message/send?access_token={token}"
-        payload = {
+        url = f"{self.BASE_URL}/auth/getuserinfo"
+        params = {"access_token": token, "code": code}
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, params=params)
+            data = resp.json()
+
+        if data.get("errcode") != 0:
+            logger.error("企业微信OAuth失败: %s", data)
+            raise RuntimeError(f"企业微信OAuth失败: {data.get('errmsg')}")
+
+        return data.get("userid", "")
+
+    async def get_user_detail(self, userid: str) -> dict:
+        """读取成员详情。"""
+        token = await self.get_access_token()
+        url = f"{self.BASE_URL}/user/get"
+        params = {"access_token": token, "userid": userid}
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, params=params)
+            data = resp.json()
+
+        if data.get("errcode") != 0:
+            logger.error("企业微信获取用户详情失败: %s", data)
+            return {}
+        return data
+
+    # ===== JS-SDK 签名（嵌入企业微信H5用）=====
+
+    def get_jsapi_ticket(self) -> str:
+        """获取JS-SDK票据（这里简化处理，生产环境应缓存到Redis）。"""
+        # 实际实现需要单独调用 /cgi-bin/get_jsapi_ticket
+        # 这里返回空字符串，由具体业务调用时实现
+        return ""
+
+    def generate_jsapi_signature(self, url: str, nonce_str: str, timestamp: int) -> str:
+        """生成JS-SDK签名（用于在企业微信内嵌H5页面时调用wx.config）。"""
+        ticket = self.get_jsapi_ticket()
+        if not ticket:
+            return ""
+        raw = f"jsapi_ticket={ticket}&noncestr={nonce_str}&timestamp={timestamp}&url={url}"
+        return hashlib.sha1(raw.encode()).hexdigest()
+
+    # ===== 消息推送 =====
+
+    async def send_text_message(self, user_ids: str, content: str) -> bool:
+        """发送文本消息。"""
+        return await self._send_app_message({
             "touser": user_ids,
             "msgtype": "text",
             "agentid": int(self.agent_id) if self.agent_id else 0,
             "text": {"content": content},
-        }
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(url, json=payload)
-            result = resp.json()
-
-        if result.get("errcode") == 0:
-            logger.info("企业微信消息发送成功 to=%s", user_ids)
-            return True
-        logger.error("企业微信消息发送失败: %s", result)
-        return False
+        })
 
     async def send_markdown_message(self, user_ids: str, content: str) -> bool:
         """发送Markdown消息（支持格式化）。"""
-        if not self.enabled:
-            return False
-
-        token = await self.get_access_token()
-        url = f"{self.BASE_URL}/message/send?access_token={token}"
-        payload = {
+        return await self._send_app_message({
             "touser": user_ids,
             "msgtype": "markdown",
             "agentid": int(self.agent_id) if self.agent_id else 0,
             "markdown": {"content": content},
-        }
+        })
+
+    async def _send_app_message(self, payload: dict) -> bool:
+        if not self.enabled:
+            return False
+        token = await self.get_access_token()
+        url = f"{self.BASE_URL}/message/send?access_token={token}"
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(url, json=payload)
             result = resp.json()
-
         if result.get("errcode") == 0:
-            logger.info("企业微信Markdown消息发送成功 to=%s", user_ids)
+            logger.info("企业微信消息发送成功 to=%s", payload.get("touser"))
             return True
-        logger.error("企业微信Markdown消息发送失败: %s", result)
+        logger.error("企业微信消息发送失败: %s", result)
         return False
 
     async def notify_invoice_result(
@@ -292,6 +299,26 @@ class WeComService:
             content += f"> **错误**: {error_msg}\n"
         content += f"\n> 详情: {settings.FRONTEND_BASE_URL}"
         return await self.send_markdown_message(user_ids, content)
+
+    # ===== 通讯录 =====
+
+    async def get_department_users(self, department_id: int = 1, fetch_child: int = 1) -> list[dict]:
+        """获取部门成员列表。"""
+        if not self.enabled:
+            return []
+        token = await self.get_access_token()
+        url = f"{self.BASE_URL}/user/simplelist"
+        params = {
+            "access_token": token,
+            "department_id": department_id,
+            "fetch_child": fetch_child,
+        }
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, params=params)
+            data = resp.json()
+        if data.get("errcode") == 0:
+            return data.get("userlist", [])
+        return []
 
 
 # 全局单例

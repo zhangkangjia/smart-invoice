@@ -1,26 +1,160 @@
-"""微信服务号回调 & 开票入口 API。
+"""企业微信 & 微信服务号 API。
 
-提供：
-1. 微信服务器签名验证（公众号后台配置）
-2. 客户通过微信菜单进入开票H5页面
-3. 微信OAuth授权回调
-4. 开票结果模板消息推送（内部调用）
+核心场景：
+1. 企业微信自建应用：OAuth 免登录、JS-SDK 签名、工作台嵌入
+2. 微信服务号：客户提交开票、模板消息通知
 """
 
+import hashlib
 import logging
-from typing import Any
+import secrets
+import time
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.security import create_access_token
 from app.db.session import get_db
+from app.models.user import User
 from app.services.wechat_service import wecom_service, wechat_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/wechat", tags=["微信集成"])
+router = APIRouter(prefix="/wechat", tags=["微信/企业微信集成"])
 
+
+# ============================================================
+# 企业微信免登录（核心）
+# ============================================================
+
+@router.get("/wecom/oauth-login", summary="企业微信OAuth免登录")
+async def wecom_oauth_login(
+    code: str = Query(..., description="企业微信OAuth code"),
+    redirect: str = Query("/", description="登录后跳转路径"),
+    db: AsyncSession = Depends(get_db),
+):
+    """企业微信自建应用免登录入口。
+
+    流程：
+    1. 用户在企业微信里点击自建应用
+    2. 企业微信带 code 跳转到本接口
+    3. 用 code 换取 userid
+    4. 在系统用户表中查找匹配的用户（userid 或 mobile 关联）
+    5. 颁发 JWT，重定向到前端
+    """
+    if not wecom_service.enabled:
+        raise HTTPException(status_code=503, detail="企业微信未配置")
+
+    # 1. code -> userid
+    userid = await wecom_service.get_user_id_by_code(code)
+    if not userid:
+        raise HTTPException(status_code=400, detail="企业微信OAuth失败")
+
+    # 2. 查系统用户（通过 wecom_userid 字段）
+    result = await db.execute(
+        select(User).where(User.wecom_userid == userid)
+    )
+    user = result.scalar_one_or_none()
+
+    # 3. 兜底：没绑定时通过手机号匹配
+    if user is None:
+        detail = await wecom_service.get_user_detail(userid)
+        mobile = detail.get("mobile", "")
+        if mobile:
+            result = await db.execute(
+                select(User).where(User.phone == mobile)
+            )
+            user = result.scalar_one_or_none()
+            if user:
+                # 绑定关系
+                user.wecom_userid = userid
+                await db.commit()
+
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=403,
+            detail="该企业微信账号未绑定系统用户，请联系管理员",
+        )
+
+    # 4. 颁发 JWT
+    access_token = create_access_token(
+        data={"sub": user.id, "tenant_id": user.tenant_id, "role": user.role}
+    )
+
+    # 5. 重定向到前端（带上 token）
+    frontend_base = settings.FRONTEND_BASE_URL.rstrip("/")
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "real_name": user.real_name,
+            "role": user.role,
+            "tenant_id": user.tenant_id,
+        },
+        "redirect": f"{frontend_base}{redirect}",
+    }
+
+
+@router.get("/wecom/jsapi-config", summary="企业微信JS-SDK配置")
+async def wecom_jsapi_config(
+    url: str = Query(..., description="当前页面URL（用于签名）"),
+):
+    """生成企业微信JS-SDK配置（用于在企业微信内嵌H5调用wx.agentConfig等）。
+
+    前端用法：
+    ```js
+    wx.config({...})
+    wx.agentConfig({
+        corpid, agentid, signature, ...
+    })
+    ```
+    """
+    if not wecom_service.enabled:
+        raise HTTPException(status_code=503, detail="企业微信未配置")
+
+    nonce_str = secrets.token_hex(8)
+    timestamp = int(time.time())
+    signature = wecom_service.generate_jsapi_signature(url, nonce_str, timestamp)
+
+    return {
+        "corp_id": wecom_service.corp_id,
+        "agent_id": wecom_service.agent_id,
+        "nonce_str": nonce_str,
+        "timestamp": timestamp,
+        "signature": signature,
+    }
+
+
+@router.post("/wecom/bind-user", summary="绑定企业微信userid")
+async def bind_wecom_user(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """管理员将系统用户与企业微信userid绑定。"""
+    user_id = data.get("user_id")
+    wecom_userid = data.get("wecom_userid")
+    if not user_id or not wecom_userid:
+        raise HTTPException(status_code=400, detail="参数缺失")
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    user.wecom_userid = wecom_userid
+    user.wecom_bound_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"success": True}
+
+
+# ============================================================
+# 微信服务号（客户侧）
+# ============================================================
 
 @router.get("/callback", summary="微信服务器验证")
 async def wechat_verify(
@@ -29,10 +163,7 @@ async def wechat_verify(
     nonce: str = Query(...),
     echostr: str = Query(...),
 ):
-    """微信公众号服务器配置校验（GET请求）。
-
-    在公众号后台 → 开发 → 基本配置中填写回调URL时使用。
-    """
+    """微信公众号服务器配置校验。"""
     if wechat_service.verify_signature(signature, timestamp, nonce):
         return int(echostr)
     raise HTTPException(status_code=403, detail="签名验证失败")
@@ -45,49 +176,31 @@ async def wechat_message(
     timestamp: str = Query(...),
     nonce: str = Query(...),
 ):
-    """接收微信事件推送（关注/菜单点击等）。
-
-    客户点击公众号菜单"申请开票"时，返回H5链接。
-    """
+    """接收微信事件推送。"""
     if not wechat_service.verify_signature(signature, timestamp, nonce):
         raise HTTPException(status_code=403, detail="签名验证失败")
-
     body = await request.body()
-    logger.info("收到微信消息回调: %s", body[:200])
-
-    # TODO: 解析XML，根据MsgType和Event返回不同响应
-    # 目前返回空响应
+    logger.info("收到微信消息: %s", body[:200])
     return "success"
 
 
 @router.get("/oauth-url", summary="获取微信授权链接")
 async def get_oauth_url(
-    redirect_uri: str = Query(..., description="授权后跳转的URL"),
-    state: str = Query("", description="透传参数"),
+    redirect_uri: str = Query(...),
+    state: str = Query(""),
 ):
-    """获取微信网页授权URL（前端跳转用）。"""
     if not wechat_service.enabled:
         raise HTTPException(status_code=503, detail="微信服务号未配置")
-    url = wechat_service.build_oauth_url(redirect_uri, scope="snsapi_userinfo", state=state)
-    return {"url": url}
+    return {"url": wechat_service.build_oauth_url(redirect_uri, scope="snsapi_userinfo", state=state)}
 
 
 @router.get("/user-info", summary="微信授权获取用户信息")
-async def get_wechat_user(code: str = Query(..., description="微信授权code")):
-    """通过微信授权code获取用户信息（openid、昵称等）。
-
-    前端流程：
-    1. 调用 /wechat/oauth-url 获取授权链接
-    2. 用户授权后微信回调带code
-    3. 前端用code调用本接口换取用户信息
-    """
+async def get_wechat_user(code: str = Query(...)):
     if not wechat_service.enabled:
         raise HTTPException(status_code=503, detail="微信服务号未配置")
-
     user_info = await wechat_service.get_oauth_user_info(code)
     if not user_info:
         raise HTTPException(status_code=400, detail="获取微信用户信息失败")
-
     return {
         "openid": user_info.get("openid", ""),
         "nickname": user_info.get("nickname", ""),
@@ -95,23 +208,15 @@ async def get_wechat_user(code: str = Query(..., description="微信授权code")
     }
 
 
-@router.post("/notify-invoice", summary="开票结果通知（内部调用）")
-async def notify_invoice_result(
-    data: dict[str, Any],
-):
-    """开票完成后推送到企业微信通知代账人员。
+# ============================================================
+# 通知推送（内部调用）
+# ============================================================
 
-    调用方传入:
-    - user_ids: 企业微信用户ID（逗号分隔）
-    - enterprise_name: 企业名称
-    - invoice_number: 发票号
-    - amount: 金额
-    - status: 状态 success/failed
-    - error_msg: 错误信息（可选）
-    """
+@router.post("/notify-invoice", summary="开票结果通知")
+async def notify_invoice_result(data: dict):
+    """开票完成后推送到企业微信。"""
     if not wecom_service.enabled:
         return {"skipped": True, "reason": "企业微信未配置"}
-
     success = await wecom_service.notify_invoice_result(
         user_ids=data.get("user_ids", ""),
         enterprise_name=data.get("enterprise_name", ""),
@@ -123,11 +228,25 @@ async def notify_invoice_result(
     return {"success": success}
 
 
-@router.get("/status", summary="微信集成状态")
-async def wechat_status():
-    """查看微信和企业微信配置状态。"""
+# ============================================================
+# 状态
+# ============================================================
+
+@router.get("/status", summary="集成状态")
+async def status():
     return {
-        "wechat_enabled": wechat_service.enabled,
-        "wecom_enabled": wecom_service.enabled,
+        "wechat_service_account": wechat_service.enabled,
+        "wecom": wecom_service.enabled,
+        "wecom_corp_id": wecom_service.corp_id if wecom_service.enabled else "",
+        "wecom_agent_id": wecom_service.agent_id if wecom_service.enabled else "",
         "frontend_base_url": settings.FRONTEND_BASE_URL,
     }
+
+
+@router.get("/wecom/department-users", summary="企业微信部门成员")
+async def get_dept_users(department_id: int = 1):
+    """获取企业微信部门成员，用于同步到系统用户。"""
+    if not wecom_service.enabled:
+        raise HTTPException(status_code=503, detail="企业微信未配置")
+    users = await wecom_service.get_department_users(department_id)
+    return {"users": users}

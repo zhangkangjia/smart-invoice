@@ -23,6 +23,9 @@ class User(Base):
     full_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
     is_super_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # 企业微信绑定
+    wecom_userid: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
+    wecom_bound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

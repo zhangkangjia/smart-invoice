@@ -9,6 +9,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '登录', requiresAuth: false }
   },
   {
+    path: '/wecom-callback',
+    name: 'WeComCallback',
+    component: () => import('@/views/WeComCallback.vue'),
+    meta: { title: '企业微信登录', requiresAuth: false }
+  },
+  {
     path: '/',
     component: () => import('@/layouts/MainLayout.vue'),
     meta: { requiresAuth: true },

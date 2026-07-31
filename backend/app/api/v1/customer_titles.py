@@ -1,9 +1,11 @@
 """客户抬头路由。"""
 
 import uuid
+from io import BytesIO
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +18,53 @@ from app.schemas.customer import CustomerTitleCreate, CustomerTitleResponse, Cus
 from app.services.audit_service import log_action
 
 router = APIRouter(prefix="/customer-titles", tags=["客户抬头"])
+
+
+@router.get("/template/download", summary="下载客户抬头导入模板")
+async def download_template(
+    current_user: User = Depends(get_current_active_user),
+):
+    """下载客户抬头批量导入 Excel 模板。"""
+    import openpyxl
+    from urllib.parse import quote
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "客户抬头模板"
+
+    headers = ["客户名称(必填)", "税号", "地址", "电话", "开户银行", "银行账号", "邮箱", "手机"]
+    ws.append(headers)
+    ws.append([
+        "上海两心同网络科技有限公司",
+        "91310115MA1K1234X5",
+        "上海市浦东新区张江高科技园区",
+        "021-88888888",
+        "中国银行上海浦东支行",
+        "1234567890123456",
+        "finance@liangxintong.com",
+        "13800138000",
+    ])
+
+    widths = [32, 22, 40, 16, 28, 24, 24, 14]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+    ws.append([])
+    ws.append(["说明:"])
+    ws.append(["1. 客户名称为必填，其余可选"])
+    ws.append(["2. 税号格式：15-20位字母数字"])
+    ws.append(["3. 批量导入的客户抬头会关联到当前选中的销方企业"])
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = "客户抬头导入模板.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
 
 
 @router.get("/lookup/by-tax-no", summary="通过税号查询客户抬头信息")

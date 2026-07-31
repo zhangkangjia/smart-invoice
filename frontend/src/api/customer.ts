@@ -46,6 +46,10 @@ export function batchImportCustomerTitles(enterpriseId: string, file: File) {
   )
 }
 
+export function downloadCustomerTitleTemplate() {
+  return request.get<unknown, Blob>('/customer-titles/template/download', { responseType: 'blob' })
+}
+
 export function getCustomerContacts(customerTitleId: string) {
   return request.get<unknown, CustomerContact[]>(`/customer-titles/${customerTitleId}/contacts`)
 }

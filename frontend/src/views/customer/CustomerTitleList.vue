@@ -2,6 +2,7 @@
   <div class="page-container">
     <PageHeader title="客户抬头" subtitle="管理客户开票抬头信息">
       <template #actions>
+        <el-button @click="downloadTemplate" :icon="Download">下载模板</el-button>
         <el-button @click="handleBatchImport">
           <el-icon><Upload /></el-icon>批量导入
         </el-button>
@@ -111,7 +112,10 @@
             <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
             <div class="el-upload__text">将文件拖到此处，或<em>点击上传</em></div>
             <template #tip>
-              <div class="el-upload__tip">支持 .xlsx, .xls, .csv，需包含：客户名称, 税号, 地址, 电话, 开户行, 银行账号</div>
+              <div class="el-upload__tip">
+                <el-button link type="primary" @click.stop="downloadTemplate">下载模板</el-button>
+                | 支持 .xlsx, .xls, .csv
+              </div>
             </template>
           </el-upload>
         </el-form-item>
@@ -126,7 +130,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
-import { Plus, Upload, UploadFilled, Search } from '@element-plus/icons-vue'
+import { Plus, Upload, UploadFilled, Search, Download } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import SearchForm from '@/components/SearchForm.vue'
@@ -136,7 +140,8 @@ import {
   updateCustomerTitle,
   deleteCustomerTitle,
   batchImportCustomerTitles,
-  lookupCustomerByTaxNo
+  lookupCustomerByTaxNo,
+  downloadCustomerTitleTemplate
 } from '@/api/customer'
 import { getEnterprises } from '@/api/enterprise'
 import type { CustomerTitle, Enterprise } from '@/types'
@@ -314,6 +319,21 @@ async function handleDelete(row: CustomerTitle) {
     fetchData()
   } catch {
     // ignore
+  }
+}
+
+async function downloadTemplate() {
+  try {
+    const res = await downloadCustomerTitleTemplate()
+    const blob = new Blob([res as any], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = '客户抬头导入模板.xlsx'
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch {
+    ElMessage.error('下载模板失败')
   }
 }
 

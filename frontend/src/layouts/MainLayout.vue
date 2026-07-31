@@ -87,7 +87,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowDown, Document, Fold, Expand } from '@element-plus/icons-vue'
+import { ArrowDown, Document, Fold, Expand, Picture } from '@element-plus/icons-vue'
 import { ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 
@@ -111,7 +111,12 @@ const menuGroups = [
     title: '批量开票', icon: 'Files', children: [
       { title: '开票任务台', path: '/invoice-batches', icon: 'Files' },
       { title: '任务查询', path: '/invoice-tasks', icon: 'List' },
-      { title: '其他录入方式', path: '/invoice/text', icon: 'EditPen' },
+    ]
+  },
+  {
+    title: '快速开票', icon: 'EditPen', children: [
+      { title: '文字开票', path: '/invoice/text', icon: 'EditPen' },
+      { title: '图片开票', path: '/invoice/image', icon: 'Picture' },
     ]
   },
   {

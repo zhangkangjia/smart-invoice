@@ -193,6 +193,7 @@ const menuGroups = [
   {
     title: '系统管理', icon: 'Setting', children: [
       { title: '系统配置', path: '/settings/system-config', icon: 'Setting' },
+      { title: '系统诊断', path: '/settings/diagnostics', icon: 'Monitor' },
       { title: '客户提交链接', path: '/submission-links', icon: 'Link' },
       { title: '通道配置', path: '/channels', icon: 'Connection' },
       { title: '机构与人员', path: '/settings/organizations', icon: 'Share' },

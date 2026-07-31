@@ -139,6 +139,177 @@ async def create_user(
     )
 
 
+# --------------------------------------------------------------------------- #
+# 角色管理（必须在 /{user_id} 之前定义，否则 /roles/all 会被 /{user_id} 捕获）
+# --------------------------------------------------------------------------- #
+
+@router.get("/roles/all", summary="角色列表")
+async def list_roles(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """获取当前租户的所有角色。"""
+    from app.core.deps import get_tenant_id
+    tid = get_tenant_id(current_user)
+    result = await db.execute(
+        select(Role).where(Role.tenant_id == tid).order_by(Role.name)
+    )
+    roles = result.scalars().all()
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "name": r.name,
+                "code": r.code,
+                "description": r.description,
+                "permissions": r.permissions or [],
+            }
+            for r in roles
+        ]
+    }
+
+
+@router.post("/roles", summary="创建角色")
+async def create_role(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles("super_admin", "agency_admin")),
+):
+    """创建自定义角色。"""
+    from app.core.deps import get_tenant_id
+    tid = get_tenant_id(current_user)
+    name = body.get("name", "").strip()
+    code = body.get("code", "").strip()
+    if not name or not code:
+        raise HTTPException(status_code=400, detail="角色名称和编码不能为空")
+
+    existing = await db.execute(
+        select(Role).where(Role.tenant_id == tid, Role.code == code)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail=f"角色编码 {code} 已存在")
+
+    role = Role(
+        id=uuid.uuid4().hex,
+        tenant_id=tid,
+        name=name,
+        code=code,
+        description=body.get("description", ""),
+        permissions=body.get("permissions", []),
+    )
+    db.add(role)
+    await log_action(
+        db=db, tenant_id=tid, user_id=current_user.id,
+        action="create_role", entity_type="role", entity_id=role.id,
+        after={"name": name, "code": code},
+    )
+    await db.commit()
+    return {"id": role.id, "name": name, "code": code}
+
+
+@router.put("/roles/{role_id}", summary="更新角色")
+async def update_role(
+    role_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles("super_admin", "agency_admin")),
+):
+    """更新角色（名称/描述/权限）。"""
+    from app.core.deps import get_tenant_id
+    tid = get_tenant_id(current_user)
+    result = await db.execute(select(Role).where(Role.id == role_id))
+    role = result.scalar_one_or_none()
+    if not role:
+        raise HTTPException(status_code=404, detail="角色不存在")
+    if role.tenant_id != tid:
+        raise HTTPException(status_code=403, detail="无权修改")
+
+    if "name" in body:
+        role.name = body["name"]
+    if "description" in body:
+        role.description = body["description"]
+    if "permissions" in body:
+        role.permissions = body["permissions"]
+
+    await log_action(
+        db=db, tenant_id=tid, user_id=current_user.id,
+        action="update_role", entity_type="role", entity_id=role.id,
+    )
+    await db.commit()
+    return {"id": role.id, "name": role.name, "code": role.code}
+
+
+@router.delete("/roles/{role_id}", summary="删除角色")
+async def delete_role(
+    role_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles("super_admin")),
+):
+    """删除自定义角色（系统内置角色不可删除）。"""
+    result = await db.execute(select(Role).where(Role.id == role_id))
+    role = result.scalar_one_or_none()
+    if not role:
+        raise HTTPException(status_code=404, detail="角色不存在")
+
+    builtin_codes = {"super_admin", "agency_admin", "branch_admin", "tax_supervisor",
+                     "accountant", "invoice_clerk", "customer_service", "operator",
+                     "auditor", "substitute"}
+    if role.code in builtin_codes:
+        raise HTTPException(status_code=400, detail=f"系统内置角色 {role.name} 不可删除")
+
+    links = await db.execute(select(UserRole).where(UserRole.role_id == role_id))
+    if links.scalars().all():
+        raise HTTPException(status_code=400, detail="该角色仍有用户关联，请先解除关联")
+
+    await log_action(
+        db=db, tenant_id=current_user.tenant_id, user_id=current_user.id,
+        action="delete_role", entity_type="role", entity_id=role.id,
+        before={"name": role.name, "code": role.code},
+    )
+    await db.delete(role)
+    await db.commit()
+    return {"message": "角色已删除"}
+
+
+@router.post("/{user_id}/roles", summary="分配角色给用户")
+async def assign_roles(
+    user_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles("super_admin", "agency_admin")),
+):
+    """给用户分配角色（覆盖式）。"""
+    from app.core.deps import get_tenant_id
+    tid = get_tenant_id(current_user)
+    result = await db.execute(select(User).where(User.id == user_id, User.tenant_id == tid))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    role_ids = body.get("role_ids", [])
+    if role_ids:
+        valid_roles = await db.execute(
+            select(Role.id).where(Role.id.in_(role_ids), Role.tenant_id == tid)
+        )
+        valid_ids = {r[0] for r in valid_roles.all()}
+        role_ids = [rid for rid in role_ids if rid in valid_ids]
+
+    old_links = await db.execute(select(UserRole).where(UserRole.user_id == user_id))
+    for link in old_links.scalars().all():
+        await db.delete(link)
+
+    for rid in role_ids:
+        db.add(UserRole(user_id=user_id, role_id=rid))
+
+    await log_action(
+        db=db, tenant_id=tid, user_id=current_user.id,
+        action="assign_roles", entity_type="user", entity_id=user_id,
+        after={"role_ids": role_ids},
+    )
+    await db.commit()
+    return {"message": "角色已更新", "role_ids": role_ids}
+
+
 @router.get("/{user_id}", response_model=UserResponse, summary="用户详情")
 async def get_user(
     user_id: str,
@@ -270,169 +441,3 @@ async def deactivate_user(
     )
     await db.commit()
     return {"message": "用户已停用"}
-
-
-# --------------------------------------------------------------------------- #
-# 角色管理
-# --------------------------------------------------------------------------- #
-
-@router.get("/roles/all", summary="角色列表")
-async def list_roles(
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-):
-    """获取当前租户的所有角色。"""
-    result = await db.execute(
-        select(Role).where(Role.tenant_id == current_user.tenant_id).order_by(Role.name)
-    )
-    roles = result.scalars().all()
-    return {
-        "items": [
-            {
-                "id": r.id,
-                "name": r.name,
-                "code": r.code,
-                "description": r.description,
-                "permissions": r.permissions or [],
-            }
-            for r in roles
-        ]
-    }
-
-
-@router.post("/roles", summary="创建角色")
-async def create_role(
-    body: dict,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("super_admin", "agency_admin")),
-):
-    """创建自定义角色。"""
-    name = body.get("name", "").strip()
-    code = body.get("code", "").strip()
-    if not name or not code:
-        raise HTTPException(status_code=400, detail="角色名称和编码不能为空")
-
-    # 检查 code 唯一
-    existing = await db.execute(
-        select(Role).where(Role.tenant_id == current_user.tenant_id, Role.code == code)
-    )
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail=f"角色编码 {code} 已存在")
-
-    role = Role(
-        id=uuid.uuid4().hex,
-        tenant_id=current_user.tenant_id,
-        name=name,
-        code=code,
-        description=body.get("description", ""),
-        permissions=body.get("permissions", []),
-    )
-    db.add(role)
-    await log_action(
-        db=db, tenant_id=current_user.tenant_id, user_id=current_user.id,
-        action="create_role", entity_type="role", entity_id=role.id,
-        after={"name": name, "code": code},
-    )
-    await db.commit()
-    return {"id": role.id, "name": name, "code": code}
-
-
-@router.put("/roles/{role_id}", summary="更新角色")
-async def update_role(
-    role_id: str,
-    body: dict,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("super_admin", "agency_admin")),
-):
-    """更新角色（名称/描述/权限）。"""
-    result = await db.execute(select(Role).where(Role.id == role_id))
-    role = result.scalar_one_or_none()
-    if not role:
-        raise HTTPException(status_code=404, detail="角色不存在")
-    if role.tenant_id != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="无权修改")
-
-    if "name" in body:
-        role.name = body["name"]
-    if "description" in body:
-        role.description = body["description"]
-    if "permissions" in body:
-        role.permissions = body["permissions"]
-
-    await log_action(
-        db=db, tenant_id=current_user.tenant_id, user_id=current_user.id,
-        action="update_role", entity_type="role", entity_id=role.id,
-    )
-    await db.commit()
-    return {"id": role.id, "name": role.name, "code": role.code}
-
-
-@router.delete("/roles/{role_id}", summary="删除角色")
-async def delete_role(
-    role_id: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("super_admin")),
-):
-    """删除自定义角色（系统内置角色不可删除）。"""
-    result = await db.execute(select(Role).where(Role.id == role_id))
-    role = result.scalar_one_or_none()
-    if not role:
-        raise HTTPException(status_code=404, detail="角色不存在")
-
-    # 系统内置角色不可删
-    builtin_codes = {"super_admin", "agency_admin", "branch_admin", "tax_supervisor",
-                     "accountant", "invoice_clerk", "customer_service", "operator",
-                     "auditor", "substitute"}
-    if role.code in builtin_codes:
-        raise HTTPException(status_code=400, detail=f"系统内置角色 {role.name} 不可删除")
-
-    # 检查是否有用户在使用
-    links = await db.execute(select(UserRole).where(UserRole.role_id == role_id))
-    if links.scalars().all():
-        raise HTTPException(status_code=400, detail="该角色仍有用户关联，请先解除关联")
-
-    await log_action(
-        db=db, tenant_id=current_user.tenant_id, user_id=current_user.id,
-        action="delete_role", entity_type="role", entity_id=role.id,
-        before={"name": role.name, "code": role.code},
-    )
-    await db.delete(role)
-    await db.commit()
-    return {"message": "角色已删除"}
-
-
-# --------------------------------------------------------------------------- #
-# 用户-角色分配
-# --------------------------------------------------------------------------- #
-
-@router.post("/{user_id}/roles", summary="分配角色给用户")
-async def assign_roles(
-    user_id: str,
-    body: dict,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("super_admin", "agency_admin")),
-):
-    """给用户分配角色（覆盖式）。"""
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
-
-    role_ids = body.get("role_ids", [])
-
-    # 删除旧关联
-    old_links = await db.execute(select(UserRole).where(UserRole.user_id == user_id))
-    for link in old_links.scalars().all():
-        await db.delete(link)
-
-    # 添加新关联
-    for rid in role_ids:
-        db.add(UserRole(user_id=user_id, role_id=rid))
-
-    await log_action(
-        db=db, tenant_id=current_user.tenant_id, user_id=current_user.id,
-        action="assign_roles", entity_type="user", entity_id=user_id,
-        after={"role_ids": role_ids},
-    )
-    await db.commit()
-    return {"message": "角色已更新", "role_ids": role_ids}

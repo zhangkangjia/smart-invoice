@@ -5,7 +5,6 @@
 2. 微信服务号：客户提交开票、模板消息通知
 """
 
-import hashlib
 import logging
 import secrets
 import time
@@ -16,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.deps import get_current_active_user, require_roles
 from app.core.security import create_access_token
 from app.db.session import get_db
 from app.models.user import User
@@ -124,7 +124,7 @@ async def wecom_jsapi_config(
 
     nonce_str = secrets.token_hex(8)
     timestamp = int(time.time())
-    signature = wecom_service.generate_jsapi_signature(url, nonce_str, timestamp)
+    signature = await wecom_service.generate_jsapi_signature(url, nonce_str, timestamp)
 
     return {
         "corp_id": wecom_service.corp_id,
@@ -139,6 +139,7 @@ async def wecom_jsapi_config(
 async def bind_wecom_user(
     data: dict,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles("super_admin", "agency_admin")),
 ):
     """管理员将系统用户与企业微信userid绑定。"""
     user_id = data.get("user_id")
@@ -146,7 +147,9 @@ async def bind_wecom_user(
     if not user_id or not wecom_userid:
         raise HTTPException(status_code=400, detail="参数缺失")
 
-    result = await db.execute(select(User).where(User.id == user_id))
+    from app.core.deps import get_tenant_id
+    tid = get_tenant_id(current_user)
+    result = await db.execute(select(User).where(User.id == user_id, User.tenant_id == tid))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")

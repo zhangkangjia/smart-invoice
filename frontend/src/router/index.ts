@@ -146,6 +146,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '系统配置', icon: 'Setting' }
       },
       {
+        path: 'settings/diagnostics',
+        name: 'SystemDiagnostics',
+        component: () => import('@/views/system/SystemDiagnostics.vue'),
+        meta: { title: '系统诊断', icon: 'Monitor' }
+      },
+      {
         path: 'ai/text',
         name: 'AIText',
         component: () => import('@/views/ai/RecognitionText.vue'),

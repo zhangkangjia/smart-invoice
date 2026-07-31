@@ -229,15 +229,32 @@ class WeComService:
 
     # ===== JS-SDK 签名（嵌入企业微信H5用）=====
 
-    def get_jsapi_ticket(self) -> str:
-        """获取JS-SDK票据（这里简化处理，生产环境应缓存到Redis）。"""
-        # 实际实现需要单独调用 /cgi-bin/get_jsapi_ticket
-        # 这里返回空字符串，由具体业务调用时实现
-        return ""
+    _jsapi_ticket: str = ""
+    _jsapi_ticket_expires: float = 0
 
-    def generate_jsapi_signature(self, url: str, nonce_str: str, timestamp: int) -> str:
+    async def get_jsapi_ticket(self) -> str:
+        """获取JS-SDK票据（带缓存）。"""
+        if self._jsapi_ticket and time.time() < self._jsapi_ticket_expires - 300:
+            return self._jsapi_ticket
+
+        token = await self.get_access_token()
+        url = f"{self.BASE_URL}/get_jsapi_ticket?access_token={token}"
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
+            data = resp.json()
+
+        if data.get("errcode") != 0:
+            logger.error("企业微信获取jsapi_ticket失败: %s", data)
+            return ""
+        self._jsapi_ticket = data["ticket"]
+        self._jsapi_ticket_expires = time.time() + data.get("expires_in", 7200)
+        return self._jsapi_ticket
+
+    async def generate_jsapi_signature(self, url: str, nonce_str: str, timestamp: int) -> str:
         """生成JS-SDK签名（用于在企业微信内嵌H5页面时调用wx.config）。"""
-        ticket = self.get_jsapi_ticket()
+        import hashlib
+
+        ticket = await self.get_jsapi_ticket()
         if not ticket:
             return ""
         raw = f"jsapi_ticket={ticket}&noncestr={nonce_str}&timestamp={timestamp}&url={url}"

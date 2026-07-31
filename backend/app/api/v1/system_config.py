@@ -325,9 +325,8 @@ async def test_config(
             return {"ok": False, "error": str(e)}
 
     if category == "baiwang":
-        from app.services.channels.baiwang_channel import BaiwangChannel
-        from app.services.channels.base import ChannelConfig
-        config = ChannelConfig(
+        from app.services.channels.baiwang_channel import BaiwangChannel, BaiwangConfig
+        config = BaiwangConfig(
             app_key=overrides.get("BAIWANG_APP_KEY", ""),
             app_secret=overrides.get("BAIWANG_APP_SECRET", ""),
             account_id=overrides.get("BAIWANG_ACCOUNT_ID", ""),

@@ -45,12 +45,20 @@ async def init_database() -> None:
             await conn.execute(text(
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS wecom_bound_at TIMESTAMPTZ"
             ))
-            # 建索引（如果不存在）
             await conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_users_wecom_userid ON users (wecom_userid)"
             ))
+            # 系统配置表
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS system_config (
+                    key VARCHAR(100) PRIMARY KEY,
+                    value TEXT,
+                    category VARCHAR(50),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
         except Exception as e:
-            logger.warning("补充 wecom_userid 字段失败（可忽略）: %s", e)
+            logger.warning("补充字段失败（可忽略）: %s", e)
     logger.info("数据库表已创建")
 
     async with AsyncSessionLocal() as db:

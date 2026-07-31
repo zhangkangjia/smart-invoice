@@ -24,6 +24,7 @@ from app.api.v1.submissions import router as submissions_router
 from app.api.v1.users import router as users_router
 from app.api.v1.work_items import router as work_items_router
 from app.api.v1.wechat import router as wechat_router
+from app.api.v1.system_config import router as system_config_router
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -49,3 +50,4 @@ api_router.include_router(batch_operations_router, tags=["批量操作"])
 api_router.include_router(submissions_router, tags=["客户提交"])
 api_router.include_router(submission_links_router, tags=["提交链接管理"])
 api_router.include_router(wechat_router, tags=["微信集成"])
+api_router.include_router(system_config_router, tags=["系统配置"])

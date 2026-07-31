@@ -134,6 +134,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '用户管理', icon: 'User' }
       },
       {
+        path: 'settings/system-config',
+        name: 'SystemConfig',
+        component: () => import('@/views/system/SystemConfig.vue'),
+        meta: { title: '系统配置', icon: 'Setting' }
+      },
+      {
         path: 'ai/text',
         name: 'AIText',
         component: () => import('@/views/ai/RecognitionText.vue'),

@@ -192,6 +192,7 @@ const menuGroups = [
   { title: '数据分析', icon: 'DataAnalysis', children: [{ title: '开票统计', path: '/statistics', icon: 'DataAnalysis' }] },
   {
     title: '系统管理', icon: 'Setting', children: [
+      { title: '系统配置', path: '/settings/system-config', icon: 'Setting' },
       { title: '客户提交链接', path: '/submission-links', icon: 'Link' },
       { title: '通道配置', path: '/channels', icon: 'Connection' },
       { title: '机构与人员', path: '/settings/organizations', icon: 'Share' },

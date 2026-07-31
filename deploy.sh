@@ -46,8 +46,8 @@ pull_code() {
 }
 
 build_and_start() {
-    log_step "构建镜像并启动服务..."
-    $COMPOSE_CMD up -d --build
+    log_step "启动服务（使用缓存镜像）..."
+    $COMPOSE_CMD up -d
     log_info "服务已启动"
 }
 
@@ -101,6 +101,15 @@ case $ACTION in
         wait_for_healthy
         show_status
         ;;
+    build)
+        stop_services
+        pull_code
+        log_step "重新构建镜像..."
+        $COMPOSE_CMD build --no-cache
+        $COMPOSE_CMD up -d
+        wait_for_healthy
+        show_status
+        ;;
     restart)
         $COMPOSE_CMD restart
         wait_for_healthy
@@ -116,8 +125,13 @@ case $ACTION in
         show_status
         ;;
     *)
-        echo "用法: $0 [pull|restart|stop|logs [service]|status]"
-        echo "  不带参数 = 全流程：停止→拉代码→构建→启动"
+        echo "用法: $0 [pull|build|restart|stop|logs [service]|status]"
+        echo "  不带参数 = 停止→拉代码→启动（日常更新用，快）"
+        echo "  build   = 停止→拉代码→重新构建镜像→启动（改了Dockerfile用）"
+        echo "  restart = 仅重启容器"
+        echo "  stop    = 停止所有服务"
+        echo "  logs    = 查看日志"
+        echo "  status  = 查看状态"
         exit 1
         ;;
 esac

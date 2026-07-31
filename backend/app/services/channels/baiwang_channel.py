@@ -1,8 +1,9 @@
 """百望云数电发票通道适配器（生产级别）。
 
 基于百望云开放平台正式 API（router/rest 网关）实现：
-- 鉴权：用户名+密码+盐值登录，获取 access_token
-- 签名：MD5(请求体JSON + appSecret)，大写
+- 鉴权：username + password + client_secret 登录，获取 access_token
+  method = baiwang.oauth.token
+- 签名：MD5(appSecret + sorted(key+value) + bizContent_json + appSecret).upper()
 - 开票：method=baiwang.s.outputinvoice.invoice
 - 查询：method=baiwang.s.outputinvoice.query
 - 重推：method=baiwang.s.outputinvoice.retry
@@ -37,6 +38,7 @@ from app.services.channels.base import (
 logger = logging.getLogger(__name__)
 
 # 百望云 API 方法名
+METHOD_AUTH = "baiwang.oauth.token"
 METHOD_INVOICE = "baiwang.s.outputinvoice.invoice"
 METHOD_QUERY = "baiwang.s.outputinvoice.query"
 METHOD_RETRY = "baiwang.s.outputinvoice.retry"
@@ -103,56 +105,103 @@ class BaiwangChannel(InvoiceChannel):
         )
 
     # ------------------------------------------------------------------ #
+    # 签名算法
+    # ------------------------------------------------------------------ #
+
+    def _sign_top_request(self, params: dict, biz_content: dict | None = None) -> str:
+        """百望云签名算法。
+
+        算法: MD5(appSecret + sorted(key+value) + bizContent_json + appSecret).upper()
+
+        Args:
+            params: 公共参数（除 sign 外）
+            biz_content: 业务参数
+
+        Returns:
+            大写 MD5 签名
+        """
+        # 按 key 字母顺序排序
+        sorted_keys = sorted(params.keys())
+        string_to_sign = self.config.app_secret
+
+        for key in sorted_keys:
+            value = params[key]
+            if value is None or str(value).strip() == "":
+                continue
+            string_to_sign += f"{key}{value}"
+
+        if biz_content:
+            string_to_sign += json.dumps(biz_content, ensure_ascii=False, separators=(",", ":"))
+
+        string_to_sign += self.config.app_secret
+        return hashlib.md5(string_to_sign.encode("utf-8")).hexdigest().upper()
+
+    # ------------------------------------------------------------------ #
     # 鉴权 - 密码登录获取 token
     # ------------------------------------------------------------------ #
 
     async def _get_access_token(self) -> str:
         """获取 access_token（带缓存，提前5分钟刷新）。
 
-        百望云鉴权流程：
-        1. 密码签名 = MD5(password + userSalt).upper()
-        2. POST /router/rest?method=baiwang.oauth2.passwordLogin
-        3. 返回 access_token
+        百望云鉴权流程:
+        1. 构建公共参数 (method=baiwang.oauth.token)
+        2. 业务参数: username, password, client_secret
+        3. 签名: signTopRequest(公共参数, appSecret, 业务参数)
+        4. POST /router/rest，公共参数在 query string，业务参数在 body
+        5. 返回 access_token
         """
         if self.config._access_token and time.time() < self.config._token_expires_at - 300:
             return self.config._access_token
 
-        # 密码签名: MD5(密码 + 盐值)
-        pwd_sign = hashlib.md5(
-            f"{self.config.password}{self.config.user_salt}".encode("utf-8")
-        ).hexdigest().upper()
+        timestamp = str(int(time.time() * 1000))
+        request_id = str(uuid.uuid4())
 
-        params = {
-            "method": "baiwang.oauth2.passwordLogin",
+        # 公共参数（query string）
+        common_params = {
+            "method": METHOD_AUTH,
             "version": API_VERSION,
             "appKey": self.config.app_key,
             "format": "json",
-            "timestamp": str(int(time.time() * 1000)),
+            "timestamp": timestamp,
             "type": "sync",
-            "requestId": str(uuid.uuid4()),
+            "requestId": request_id,
         }
-        body = {
+
+        # 业务参数（form-urlencoded 方式提交）
+        biz_params = {
+            "grant_type": "password",
             "username": self.config.username,
-            "password": pwd_sign,
+            "password": self.config.password,
+            "client_id": self.config.app_key,
+            "client_secret": self.config.app_secret,
         }
+
+        # 签名（公共参数 + 业务参数参与签名）
+        all_sign_params = {**common_params, **biz_params}
+        sign = self._sign_top_request(all_sign_params)
+        common_params["sign"] = sign
 
         try:
             resp = await self._client.post(
                 self.config.api_base_url,
-                params=params,
-                json=body,
+                params=common_params,
+                data=biz_params,  # form-urlencoded
             )
             resp.raise_for_status()
             data = resp.json()
 
-            if not data.get("success"):
+            if not data.get("success", True):
                 err = data.get("errorResponse", {})
                 raise Exception(
                     f"百望云登录失败: code={err.get('code')}, msg={err.get('message')}"
                 )
 
-            token = data["response"]["accessToken"]
-            expires_in = data["response"].get("expiresIn", 7200)
+            response = data.get("response", data)
+            token = response.get("access_token") or response.get("accessToken", "")
+            if not token:
+                raise Exception(f"百望云返回无 token: {data}")
+
+            expires_in = response.get("expires_in") or response.get("expiresIn", 7200)
             self.config._access_token = token
             self.config._token_expires_at = time.time() + expires_in
             logger.info("百望云 token 获取成功，有效期 %ss", expires_in)
@@ -161,14 +210,6 @@ class BaiwangChannel(InvoiceChannel):
         except httpx.HTTPError as e:
             logger.error("百望云鉴权网络错误: %s", e)
             raise
-
-    def _calc_sign(self, body_str: str) -> str:
-        """计算请求签名。
-
-        百望云签名规则: MD5(请求体JSON + appSecret) 大写
-        """
-        raw = f"{body_str}{self.config.app_secret}"
-        return hashlib.md5(raw.encode("utf-8")).hexdigest().upper()
 
     async def _request(self, method: str, business_data: dict) -> dict:
         """发送百望云 API 请求。
@@ -184,12 +225,8 @@ class BaiwangChannel(InvoiceChannel):
         timestamp = str(int(time.time() * 1000))
         request_id = str(uuid.uuid4())
 
-        # 业务参数 JSON（sign 签名的对象）
-        body_str = json.dumps(business_data, ensure_ascii=False, separators=(",", ":"))
-        sign = self._calc_sign(body_str)
-
-        # 公共参数通过 query string 传递
-        params = {
+        # 公共参数
+        common_params = {
             "method": method,
             "version": API_VERSION,
             "appKey": self.config.app_key,
@@ -198,20 +235,23 @@ class BaiwangChannel(InvoiceChannel):
             "token": token,
             "type": "sync",
             "requestId": request_id,
-            "sign": sign,
         }
+
+        # 签名
+        sign = self._sign_top_request(common_params, business_data)
+        common_params["sign"] = sign
 
         try:
             resp = await self._client.post(
                 self.config.api_base_url,
-                params=params,
-                content=body_str,
+                params=common_params,
+                json=business_data,
                 headers={"Content-Type": "application/json;charset=UTF-8"},
             )
             resp.raise_for_status()
             result = resp.json()
 
-            if not result.get("success"):
+            if not result.get("success", True):
                 err = result.get("errorResponse", {})
                 error_msg = f"百望云API错误: code={err.get('code')}, msg={err.get('message')}"
                 if err.get("subCode"):

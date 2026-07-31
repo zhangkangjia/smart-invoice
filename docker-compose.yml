@@ -119,11 +119,15 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       AI_USE_MOCK: "true"
       CORS_ORIGINS: '["*"]'
-      # 百望云数电发票通道（需在 https://open.baiwang.com 注册获取）
+      # 百望云数电发票通道（沙箱配置，生产请修改 .env）
       BAIWANG_APP_KEY: ${BAIWANG_APP_KEY:-}
       BAIWANG_APP_SECRET: ${BAIWANG_APP_SECRET:-}
-      BAIWANG_API_BASE_URL: ${BAIWANG_API_BASE_URL:-https://open.baiwang.com}
-      BAIWANG_ACCOUNT_ID: ${BAIWANG_ACCOUNT_ID:-}
+      BAIWANG_USER_SALT: ${BAIWANG_USER_SALT:-}
+      BAIWANG_USERNAME: ${BAIWANG_USERNAME:-}
+      BAIWANG_PASSWORD: ${BAIWANG_PASSWORD:-}
+      BAIWANG_TAX_NO: ${BAIWANG_TAX_NO:-}
+      BAIWANG_INVOICE_TERMINAL_CODE: ${BAIWANG_INVOICE_TERMINAL_CODE:-}
+      BAIWANG_API_BASE_URL: ${BAIWANG_API_BASE_URL:-https://sandbox-openapi.baiwang.com/router/rest}
       DEFAULT_ADMIN_USERNAME: admin
       DEFAULT_ADMIN_PASSWORD: admin123456
       DEFAULT_ADMIN_EMAIL: admin@smart-invoice.local

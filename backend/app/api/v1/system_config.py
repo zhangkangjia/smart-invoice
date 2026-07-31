@@ -107,12 +107,26 @@ CONFIG_DEFINITIONS: list[ConfigGroup] = [
                        label="AppSecret",
                        description="百望云开放平台 → 应用管理 → AppSecret",
                        is_secret=True),
-            ConfigItem(key="BAIWANG_ACCOUNT_ID", value="", category="baiwang",
-                       label="账户ID (AccountID)",
-                       description="百望云账户ID"),
-            ConfigItem(key="BAIWANG_API_BASE_URL", value="https://open.baiwang.com",
+            ConfigItem(key="BAIWANG_USER_SALT", value="", category="baiwang",
+                       label="用户盐值",
+                       description="百望云分配的用户盐值（用于密码登录签名）",
+                       is_secret=True),
+            ConfigItem(key="BAIWANG_USERNAME", value="", category="baiwang",
+                       label="租户管理员账号",
+                       description="百望云租户管理员账号"),
+            ConfigItem(key="BAIWANG_PASSWORD", value="", category="baiwang",
+                       label="租户管理员密码",
+                       description="百望云租户管理员密码",
+                       is_secret=True),
+            ConfigItem(key="BAIWANG_TAX_NO", value="", category="baiwang",
+                       label="默认销方税号",
+                       description="默认销方纳税人识别号"),
+            ConfigItem(key="BAIWANG_INVOICE_TERMINAL_CODE", value="", category="baiwang",
+                       label="税控终端代码",
+                       description="开票终端/数电账号"),
+            ConfigItem(key="BAIWANG_API_BASE_URL", value="https://sandbox-openapi.baiwang.com/router/rest",
                        category="baiwang", label="API Base URL",
-                       description="默认 https://open.baiwang.com"),
+                       description="沙箱: https://sandbox-openapi.baiwang.com/router/rest | 生产: https://openapi.baiwang.com/router/rest"),
         ],
     ),
     ConfigGroup(
@@ -329,17 +343,25 @@ async def test_config(
         config = BaiwangConfig(
             app_key=overrides.get("BAIWANG_APP_KEY", ""),
             app_secret=overrides.get("BAIWANG_APP_SECRET", ""),
-            account_id=overrides.get("BAIWANG_ACCOUNT_ID", ""),
-            api_base_url=overrides.get("BAIWANG_API_BASE_URL", "https://open.baiwang.com"),
+            user_salt=overrides.get("BAIWANG_USER_SALT", ""),
+            username=overrides.get("BAIWANG_USERNAME", ""),
+            password=overrides.get("BAIWANG_PASSWORD", ""),
+            tax_no=overrides.get("BAIWANG_TAX_NO", ""),
+            invoice_terminal_code=overrides.get("BAIWANG_INVOICE_TERMINAL_CODE", ""),
+            api_base_url=overrides.get("BAIWANG_API_BASE_URL", "https://sandbox-openapi.baiwang.com/router/rest"),
         )
         if not config.app_key:
             return {"ok": False, "error": "百望云未配置 AppKey"}
         channel = BaiwangChannel(config=config)
         try:
-            token = await channel._get_access_token()
-            return {"ok": True, "message": "百望云鉴权成功", "token_prefix": token[:20] + "..."}
+            ok = await channel.check_health()
+            if ok:
+                return {"ok": True, "message": "百望云鉴权成功"}
+            return {"ok": False, "error": "百望云鉴权失败"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+        finally:
+            await channel.close()
 
     if category == "ai":
         from app.core.config import settings

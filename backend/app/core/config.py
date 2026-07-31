@@ -59,8 +59,13 @@ class Settings(BaseSettings):
     # --- 百望云通道 ---
     BAIWANG_APP_KEY: str = ""
     BAIWANG_APP_SECRET: str = ""
-    BAIWANG_API_BASE_URL: str = "https://open.baiwang.com"
+    BAIWANG_API_BASE_URL: str = "https://sandbox-openapi.baiwang.com/router/rest"
     BAIWANG_ACCOUNT_ID: str = ""
+    BAIWANG_USER_SALT: str = ""
+    BAIWANG_USERNAME: str = ""
+    BAIWANG_PASSWORD: str = ""
+    BAIWANG_TAX_NO: str = ""
+    BAIWANG_INVOICE_TERMINAL_CODE: str = ""
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

@@ -1,0 +1,81 @@
+:root {
+  --primary-color: #2563EB;
+  --primary-color-light: #3b82f6;
+  --primary-color-dark: #1d4ed8;
+  --bg-color: #F6F8FB;
+  --border-radius: 8px;
+  --text-color: #1F2937;
+  --text-color-secondary: #6B7280;
+  --border-color: #E5E7EB;
+  --success-color: #10B981;
+  --warning-color: #F59E0B;
+  --danger-color: #EF4444;
+  --info-color: #6B7280;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  background-color: var(--bg-color);
+  color: var(--text-color);
+  font-size: 14px;
+}
+
+a {
+  text-decoration: none;
+  color: var(--primary-color);
+}
+
+// Element Plus 主色覆盖
+.el-button--primary {
+  --el-button-bg-color: var(--primary-color);
+  --el-button-border-color: var(--primary-color);
+  --el-button-hover-bg-color: var(--primary-color-light);
+  --el-button-hover-border-color: var(--primary-color-light);
+  --el-button-active-bg-color: var(--primary-color-dark);
+  --el-button-active-border-color: var(--primary-color-dark);
+}
+
+.el-menu {
+  border-right: none;
+}
+
+.page-container {
+  padding: 20px;
+}
+
+.card-shadow {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  border-radius: var(--border-radius);
+}
+
+// 滚动条样式
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #C1C7D0;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #A1A7B0;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}

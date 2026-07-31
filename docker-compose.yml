@@ -1,0 +1,156 @@
+services:
+
+  # ========== PostgreSQL ==========
+  postgres:
+    image: postgres:16-alpine
+    container_name: si-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-smartinvoice}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-smartinvoice123}
+      POSTGRES_DB: ${POSTGRES_DB:-smart_invoice}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - si-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-smartinvoice} -d ${POSTGRES_DB:-smart_invoice}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ========== Redis ==========
+  redis:
+    image: redis:7-alpine
+    container_name: si-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ========== RabbitMQ ==========
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: si-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-smartinvoice}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-smartinvoice123}
+    ports:
+      - "${RABBITMQ_AMQP_PORT:-5672}:5672"
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # ========== MinIO ==========
+  minio:
+    image: minio/minio:latest
+    container_name: si-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-smartinvoice}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-smartinvoice123}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - si-minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ========== MinIO 初始化（创建bucket） ==========
+  minio-init:
+    image: minio/mc:latest
+    container_name: si-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-smartinvoice} ${MINIO_ROOT_PASSWORD:-smartinvoice123} &&
+      mc mb local/smart-invoice --ignore-existing &&
+      mc anonymous set download local/smart-invoice &&
+      echo 'MinIO bucket created' &&
+      exit 0
+      "
+    restart: "no"
+
+  # ========== 后端 ==========
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: si-backend
+    restart: unless-stopped
+    command: ["sh", "-c", "python -m app.db.init_db && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-smartinvoice}:${POSTGRES_PASSWORD:-smartinvoice123}@postgres:5432/${POSTGRES_DB:-smart_invoice}
+      DATABASE_SYNC_URL: postgresql+psycopg2://${POSTGRES_USER:-smartinvoice}:${POSTGRES_PASSWORD:-smartinvoice123}@postgres:5432/${POSTGRES_DB:-smart_invoice}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-smartinvoice}:${RABBITMQ_PASSWORD:-smartinvoice123}@rabbitmq:5672//
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-smartinvoice}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-smartinvoice123}
+      MINIO_BUCKET: smart-invoice
+      MINIO_SECURE: "false"
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-in-production}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      AI_USE_MOCK: "true"
+      CORS_ORIGINS: '["*"]'
+      # 百望云数电发票通道（需在 https://open.baiwang.com 注册获取）
+      BAIWANG_APP_KEY: ${BAIWANG_APP_KEY:-}
+      BAIWANG_APP_SECRET: ${BAIWANG_APP_SECRET:-}
+      BAIWANG_API_BASE_URL: ${BAIWANG_API_BASE_URL:-https://open.baiwang.com}
+      BAIWANG_ACCOUNT_ID: ${BAIWANG_ACCOUNT_ID:-}
+      DEFAULT_ADMIN_USERNAME: admin
+      DEFAULT_ADMIN_PASSWORD: admin123456
+      DEFAULT_ADMIN_EMAIL: admin@smart-invoice.local
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - ./backend:/app
+      - si-backend-venv:/app/venv
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # ========== 前端（开发模式） ==========
+  frontend:
+    image: node:20-alpine
+    container_name: si-frontend
+    restart: unless-stopped
+    working_dir: /app
+    command: sh -c "npm install --legacy-peer-deps && npx vite --host 0.0.0.0 --port 5173"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+      VITE_PROXY_TARGET: http://backend:8000
+    ports:
+      - "${FRONTEND_PORT:-3000}:5173"
+    volumes:
+      - ./frontend:/app
+      - si-frontend-node-modules:/app/node_modules
+    depends_on:
+      - backend
+
+volumes:
+  si-pg-data:
+  si-minio-data:
+  si-backend-venv:
+  si-frontend-node-modules:

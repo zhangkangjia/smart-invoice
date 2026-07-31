@@ -1,43 +1,16 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-venv/
-env/
-.venv/
-*.egg-info/
-dist/
-build/
-
-# Node
-node_modules/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.venv/
+backend/.env
+*.pyc
+*.pyo
+frontend/node_modules/
 frontend/dist/
-frontend/.vite/
-
-# IDE
+frontend/.env
+.env
 .vscode/
 .idea/
-*.swp
-*.swo
-
-# Env
-.env
-.env.local
-.env.*.local
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Docker
-docker-compose.override.yml
-
-# Logs
-*.log
-logs/
-
-# Uploads
-uploads/
-tmp/
+baiwang/
+*.zip
+*.pptx
+*.txt~

@@ -5,22 +5,27 @@
 
 import hashlib
 import logging
+import secrets
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.models.business import BusinessRequest, SourceDocument
 from app.models.enterprise import Enterprise
+from app.models.invoice import InvoiceRequest
 from app.models.invoice_task import InvoiceResult, InvoiceTask
 from app.models.misc import SubmissionLink
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/submissions", tags=["客户提交"])
+
+# 内存中存储已验证的 session_token（生产环境应使用 Redis）
+_session_tokens: dict[str, str] = {}
 
 
 async def _get_valid_link(db: AsyncSession, token: str) -> SubmissionLink:
@@ -32,13 +37,10 @@ async def _get_valid_link(db: AsyncSession, token: str) -> SubmissionLink:
 
     if link is None:
         raise HTTPException(status_code=404, detail="提交链接不存在")
-
     if not link.is_active:
         raise HTTPException(status_code=403, detail="提交链接已停用")
-
     if link.expires_at and link.expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=403, detail="提交链接已过期")
-
     if link.used_count >= link.max_uses:
         raise HTTPException(status_code=403, detail="提交链接已达最大使用次数")
 
@@ -50,30 +52,27 @@ async def get_submission_info(
     token: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """客户获取提交链接关联的企业信息（不返回敏感数据）。"""
+    """客户获取提交链接关联的企业信息。"""
     link = await _get_valid_link(db, token)
 
-    # 查找企业
     result = await db.execute(
         select(Enterprise).where(Enterprise.id == link.enterprise_id)
     )
     enterprise = result.scalar_one_or_none()
-
     if enterprise is None:
         raise HTTPException(status_code=404, detail="关联企业不存在")
 
-    # 脱敏企业名称
     name = enterprise.name
-    if len(name) > 2:
-        masked_name = name[:2] + "*" * (len(name) - 2)
-    else:
-        masked_name = name
+    masked_name = name[:2] + "*" * (len(name) - 2) if len(name) > 2 else name
 
     return {
         "enterprise_name": masked_name,
         "requires_password": link.password_hash is not None,
+        "is_active": link.is_active,
         "link_type": link.link_type,
-        "remaining_uses": link.max_uses - link.used_count,
+        "used_count": link.used_count,
+        "max_uses": link.max_uses,
+        "expires_at": link.expires_at.isoformat() if link.expires_at else None,
     }
 
 
@@ -94,15 +93,21 @@ async def auth_submission(
     if not verify_password(password, link.password_hash):
         raise HTTPException(status_code=401, detail="密码错误")
 
-    # 生成临时会话token
-    import secrets
-
     session_token = secrets.token_urlsafe(32)
+    _session_tokens[session_token] = token
 
     return {
         "session_token": session_token,
         "expires_in": 3600,
     }
+
+
+def _verify_session(token: str, session_token: str | None) -> bool:
+    """验证 session_token 是否匹配。"""
+    if not session_token:
+        return False
+    stored = _session_tokens.get(session_token)
+    return stored == token
 
 
 @router.post("/{token}/submit", summary="客户提交开票资料")
@@ -115,26 +120,20 @@ async def submit_via_link(
     contact_phone: str | None = Form(None),
     contact_email: str | None = Form(None),
     files: list[UploadFile] = File(default=[]),
+    x_session_token: str | None = Header(None, alias="X-Session-Token"),
     db: AsyncSession = Depends(get_db),
 ):
-    """客户通过专属链接提交开票资料。
-
-    提交内容包括文字描述、附件文件、外部订单号、联系方式等。
-    系统会创建 BusinessRequest 并关联来源单据。
-    """
+    """客户通过专属链接提交开票资料。"""
     link = await _get_valid_link(db, token)
 
-    # 如果需要密码，验证session_token
+    # 密码验证
     if link.password_hash is not None:
-        # 简化处理：要求在header中传递session_token
-        # 实际应从请求中获取并验证
-        pass
+        if not _verify_session(token, x_session_token):
+            raise HTTPException(status_code=401, detail="请先验证密码")
 
-    # 验证至少有内容或文件
     if not content and not files:
         raise HTTPException(status_code=400, detail="请提供开票内容或上传文件")
 
-    # 创建 BusinessRequest
     request_id = uuid.uuid4().hex
     business_request = BusinessRequest(
         id=request_id,
@@ -152,7 +151,6 @@ async def submit_via_link(
     db.add(business_request)
     await db.flush()
 
-    # 保存文字内容作为来源单据
     if content:
         text_doc = SourceDocument(
             id=uuid.uuid4().hex,
@@ -163,7 +161,6 @@ async def submit_via_link(
         )
         db.add(text_doc)
 
-    # 保存上传文件
     saved_files: list[dict] = []
     for upload_file in files:
         file_content = await upload_file.read()
@@ -171,8 +168,6 @@ async def submit_via_link(
             continue
 
         file_hash = hashlib.sha256(file_content).hexdigest()
-
-        # 判断文件类型
         filename = upload_file.filename or "unknown"
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         if ext in ("jpg", "jpeg", "png", "gif", "bmp"):
@@ -197,19 +192,14 @@ async def submit_via_link(
             file_key=f"submissions/{request_id}/{filename}",
         )
         db.add(doc)
-        saved_files.append({
-            "file_name": filename,
-            "file_size": len(file_content),
-            "doc_type": doc_type,
-        })
+        saved_files.append({"file_name": filename, "file_size": len(file_content), "doc_type": doc_type})
 
-    # 更新链接使用次数
     link.used_count += 1
-
     await db.commit()
 
     return {
         "request_id": request_id,
+        "request_no": request_id[:8].upper(),
         "status": "pending",
         "message": "提交成功，请等待处理",
         "files_saved": len(saved_files),
@@ -226,7 +216,6 @@ async def get_submission_status(
     """客户查询已提交申请的状态。"""
     link = await _get_valid_link(db, token)
 
-    # 查找业务申请
     result = await db.execute(
         select(BusinessRequest).where(
             BusinessRequest.id == request_id,
@@ -234,37 +223,64 @@ async def get_submission_status(
             BusinessRequest.enterprise_id == link.enterprise_id,
         )
     )
-    request = result.scalar_one_or_none()
-
-    if request is None:
+    br = result.scalar_one_or_none()
+    if br is None:
         raise HTTPException(status_code=404, detail="申请不存在")
 
-    # 查找关联的开票任务
-    from app.models.invoice_task import InvoiceTask
+    enterprise = (await db.execute(
+        select(Enterprise).where(Enterprise.id == link.enterprise_id)
+    )).scalar_one_or_none()
 
-    task_result = await db.execute(
-        select(InvoiceTask).where(
-            InvoiceTask.invoice_request_id == request_id,
-        ).order_by(InvoiceTask.created_at.desc())
+    # 通过 InvoiceRequest.business_request_id 关联，而不是直接查 InvoiceTask
+    inv_req_result = await db.execute(
+        select(InvoiceRequest).where(InvoiceRequest.business_request_id == request_id)
     )
-    tasks = task_result.scalars().all()
+    invoice_request = inv_req_result.scalar_one_or_none()
 
-    task_statuses = [
-        {
-            "task_id": t.id,
-            "status": t.status,
-            "submitted_at": t.submitted_at.isoformat() if t.submitted_at else None,
-            "completed_at": t.completed_at.isoformat() if t.completed_at else None,
-        }
-        for t in tasks
-    ]
+    timeline: list[dict] = []
+    tasks_data: list[dict] = []
+
+    if invoice_request:
+        task_result = await db.execute(
+            select(InvoiceTask).where(
+                InvoiceTask.invoice_request_id == invoice_request.id
+            ).order_by(InvoiceTask.created_at.desc())
+        )
+        tasks = task_result.scalars().all()
+
+        for t in tasks:
+            inv_result = (await db.execute(
+                select(InvoiceResult).where(InvoiceResult.invoice_task_id == t.id)
+            )).scalar_one_or_none()
+
+            tasks_data.append({
+                "task_id": t.id,
+                "status": t.status,
+                "invoice_number": inv_result.invoice_number if inv_result else None,
+                "submitted_at": t.submitted_at.isoformat() if t.submitted_at else None,
+                "completed_at": t.completed_at.isoformat() if t.completed_at else None,
+                "last_error": t.last_error,
+            })
+
+            if t.status == "success":
+                timeline.append({"action": "开票成功", "time": t.completed_at.isoformat() if t.completed_at else None})
+            elif t.status == "failed":
+                timeline.append({"action": f"开票失败: {t.last_error}", "time": t.completed_at.isoformat() if t.completed_at else None})
+            elif t.status in ("submitting", "queuing", "accepted"):
+                timeline.append({"action": "正在开票", "time": t.submitted_at.isoformat() if t.submitted_at else None})
+
+    timeline.insert(0, {"action": "提交成功", "time": br.created_at.isoformat() if br.created_at else None})
 
     return {
         "request_id": request_id,
-        "status": request.status,
-        "current_stage": request.current_stage,
-        "tasks": task_statuses,
-        "created_at": request.created_at.isoformat() if request.created_at else None,
+        "request_no": request_id[:8].upper(),
+        "status": br.status,
+        "enterprise_name": enterprise.name if enterprise else None,
+        "current_stage": br.current_stage,
+        "tasks": tasks_data,
+        "timeline": timeline,
+        "created_at": br.created_at.isoformat() if br.created_at else None,
+        "updated_at": br.updated_at.isoformat() if br.updated_at else None,
     }
 
 
@@ -277,7 +293,6 @@ async def get_submission_result(
     """客户下载开票结果文件。"""
     link = await _get_valid_link(db, token)
 
-    # 查找业务申请
     result = await db.execute(
         select(BusinessRequest).where(
             BusinessRequest.id == request_id,
@@ -285,41 +300,74 @@ async def get_submission_result(
             BusinessRequest.enterprise_id == link.enterprise_id,
         )
     )
-    request = result.scalar_one_or_none()
-
-    if request is None:
+    br = result.scalar_one_or_none()
+    if br is None:
         raise HTTPException(status_code=404, detail="申请不存在")
 
-    # 查找关联的开票任务及结果
-    from app.models.invoice_task import InvoiceResult, InvoiceTask
-
-    task_result = await db.execute(
-        select(InvoiceTask).where(
-            InvoiceTask.invoice_request_id == request_id,
-        ).order_by(InvoiceTask.created_at.desc())
+    # 通过 InvoiceRequest 关联查找
+    inv_req_result = await db.execute(
+        select(InvoiceRequest).where(InvoiceRequest.business_request_id == request_id)
     )
-    tasks = task_result.scalars().all()
+    invoice_request = inv_req_result.scalar_one_or_none()
 
     results: list[dict] = []
-    for task in tasks:
-        inv_result = await db.execute(
-            select(InvoiceResult).where(InvoiceResult.invoice_task_id == task.id)
+    if invoice_request:
+        task_result = await db.execute(
+            select(InvoiceTask).where(InvoiceTask.invoice_request_id == invoice_request.id)
         )
-        inv = inv_result.scalar_one_or_none()
-        if inv:
-            results.append({
-                "task_id": task.id,
-                "status": task.status,
-                "invoice_number": inv.invoice_number,
-                "invoice_code": inv.invoice_code,
-                "invoice_date": inv.invoice_date.isoformat() if inv.invoice_date else None,
-                "total_with_tax": str(inv.total_with_tax) if inv.total_with_tax else None,
-                "file_status": inv.file_status,
-                "file_key": inv.file_key,
-                "download_available": inv.file_status == "available" and inv.file_key is not None,
-            })
+        tasks = task_result.scalars().all()
+        for task in tasks:
+            inv_result = (await db.execute(
+                select(InvoiceResult).where(InvoiceResult.invoice_task_id == task.id)
+            )).scalar_one_or_none()
+            if inv_result:
+                results.append({
+                    "task_id": task.id,
+                    "status": task.status,
+                    "invoice_number": inv_result.invoice_number,
+                    "invoice_code": inv_result.invoice_code,
+                    "total_with_tax": str(inv_result.total_with_tax) if inv_result.total_with_tax else None,
+                    "file_status": inv_result.file_status,
+                    "download_available": inv_result.file_status == "available" and inv_result.file_key is not None,
+                })
+
+    return {"request_id": request_id, "results": results}
+
+
+@router.get("/{token}/history", summary="历史提交记录")
+async def get_submission_history(
+    token: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+):
+    """客户查看历史提交记录。"""
+    link = await _get_valid_link(db, token)
+
+    from sqlalchemy import func
+    stmt = select(BusinessRequest).where(
+        BusinessRequest.tenant_id == link.tenant_id,
+        BusinessRequest.enterprise_id == link.enterprise_id,
+        BusinessRequest.source_type == "web_link",
+    ).order_by(BusinessRequest.created_at.desc())
+
+    total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
+    offset = (page - 1) * page_size
+    result = await db.execute(stmt.offset(offset).limit(page_size))
+    items = result.scalars().all()
 
     return {
-        "request_id": request_id,
-        "results": results,
+        "items": [
+            {
+                "request_id": r.id,
+                "request_no": r.id[:8].upper(),
+                "status": r.status,
+                "external_order_no": r.external_order_no,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in items
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
     }

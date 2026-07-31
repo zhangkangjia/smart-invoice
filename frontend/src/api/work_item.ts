@@ -20,13 +20,13 @@ export function getWorkItem(id: string) {
 }
 
 export function assignWorkItem(id: string, assigneeId: string) {
-  return request.post<unknown, WorkItem>(`/work-items/${id}/assign`, { assignee_id: assigneeId })
+  return request.post<unknown, WorkItem>(`/work-items/${id}/assign`, { to_user_id: assigneeId })
 }
 
 export function transferWorkItem(id: string, assigneeId: string, reason: string) {
-  return request.post<unknown, WorkItem>(`/work-items/${id}/transfer`, { assignee_id: assigneeId, reason })
+  return request.post<unknown, WorkItem>(`/work-items/${id}/transfer`, { to_user_id: assigneeId, reason })
 }
 
 export function resolveWorkItem(id: string, data: { resolution: string; remark?: string }) {
-  return request.post<unknown, WorkItem>(`/work-items/${id}/resolve`, data)
+  return request.post<unknown, WorkItem>(`/work-items/${id}/resolve`, { handling_note: data.resolution, remark: data.remark })
 }

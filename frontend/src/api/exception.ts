@@ -23,5 +23,5 @@ export function resolveException(id: string, data: { resolution: string; remark?
 }
 
 export function batchFixExceptions(ids: string[], fixAction: string) {
-  return request.post<unknown, { success_count: number; failed_count: number }>('/exceptions/batch-fix', { ids, fix_action: fixAction })
+  return request.post<unknown, { success_count: number; failed_count: number }>('/exceptions/batch-fix', { exception_ids: ids, resolution: fixAction })
 }

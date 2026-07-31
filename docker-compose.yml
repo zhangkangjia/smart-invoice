@@ -100,12 +100,11 @@ services:
 
   # ========== 后端 ==========
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: python:3.12-slim
     container_name: si-backend
     restart: unless-stopped
-    command: ["sh", "-c", "if [ ! -f /app/venv/bin/uvicorn ]; then python -m venv /app/venv && /app/venv/bin/pip install -i https://mirrors.cloud.tencent.com/pypi/simple/ -r /app/requirements.txt; fi && /app/venv/bin/python -m app.db.init_db && /app/venv/bin/python -m app.db.seed_demo && /app/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    working_dir: /app
+    command: ["sh", "-c", "pip install -i https://mirrors.cloud.tencent.com/pypi/simple/ -r /app/requirements.txt 2>&1 | tail -3 && python -m app.db.init_db && python -m app.db.seed_demo && exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"]
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-smartinvoice}:${POSTGRES_PASSWORD:-smartinvoice123}@postgres:5432/${POSTGRES_DB:-smart_invoice}
       DATABASE_SYNC_URL: postgresql+psycopg2://${POSTGRES_USER:-smartinvoice}:${POSTGRES_PASSWORD:-smartinvoice123}@postgres:5432/${POSTGRES_DB:-smart_invoice}
@@ -142,7 +141,6 @@ services:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
       - ./backend:/app
-      - si-backend-venv:/app/venv
     depends_on:
       postgres:
         condition: service_healthy
@@ -171,5 +169,3 @@ services:
 volumes:
   si-pg-data:
   si-minio-data:
-  si-backend-venv:
-  si-frontend-node-modules:

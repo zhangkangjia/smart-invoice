@@ -154,14 +154,12 @@ case $ACTION in
     rebuild)
         stop_services
         pull_code
-        log_step "清除后端依赖缓存..."
-        docker volume rm smart-invoice_si-backend-venv 2>/dev/null || true
         log_step "重新构建前端镜像..."
         $COMPOSE_CMD build --no-cache frontend
         start_services
         wait_for_ready
         show_status
-        log_warn "首次启动需安装依赖，请耐心等待1-2分钟"
+        log_warn "首次启动需安装后端依赖，请耐心等待2-3分钟"
         ;;
     stop)
         stop_services

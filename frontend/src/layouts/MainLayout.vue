@@ -14,6 +14,34 @@
       </div>
       <div class="header-center"></div>
       <div class="header-right">
+        <!-- 租户切换（仅超管可见） -->
+        <el-dropdown
+          v-if="authStore.user?.is_super_admin"
+          trigger="click"
+          @command="handleSwitchTenant"
+          class="tenant-switcher"
+        >
+          <div class="tenant-display">
+            <el-icon><Switch /></el-icon>
+            <span class="tenant-name">{{ currentTenantName || '选择租户' }}</span>
+            <el-icon><ArrowDown /></el-icon>
+          </div>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item
+                v-for="t in tenants"
+                :key="t.id"
+                :command="t.id"
+                :disabled="t.id === authStore.user?.tenant_id"
+              >
+                {{ t.name }}
+                <el-tag v-if="t.id === authStore.user?.tenant_id" size="small" type="success" style="margin-left: 8px">
+                  当前
+                </el-tag>
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <el-dropdown trigger="click" @command="handleCommand">
           <div class="user-info">
             <el-avatar :size="32" :src="authStore.user?.avatar">
@@ -87,20 +115,48 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowDown, Document, Fold, Expand, Picture } from '@element-plus/icons-vue'
-import { ElMessageBox } from 'element-plus'
+import { ArrowDown, Document, Fold, Expand, Picture, Switch } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
+import { listTenants, type TenantItem } from '@/api/auth'
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 
 const isCollapse = ref(false)
+const tenants = ref<TenantItem[]>([])
+const currentTenantName = ref('')
 
 const activeMenu = computed(() => route.path)
 
 function toggleCollapse() {
-  isCollapse.value = !isCollapse.value
+    isCollapse.value = !isCollapse.value
+}
+
+async function loadTenants() {
+    try {
+        const res = await listTenants()
+        tenants.value = res.tenants
+        const current = res.tenants.find(t => t.id === res.current_tenant_id)
+        currentTenantName.value = current?.name || ''
+    } catch {
+        // 非超管会 403，忽略
+    }
+}
+
+async function handleSwitchTenant(tenantId: string) {
+    try {
+        await ElMessageBox.confirm(
+            `切换到 "${tenants.value.find(t => t.id === tenantId)?.name}"？切换后所有数据将按新租户加载。`,
+            '切换租户',
+            { type: 'warning', confirmButtonText: '确认切换', cancelButtonText: '取消' }
+        )
+        await authStore.switchTenant(tenantId)
+        ElMessage.success('已切换租户')
+    } catch (e: any) {
+        if (e !== 'cancel') ElMessage.error('切换失败')
+    }
 }
 
 // 面向代账运营人员的精简主路径：导入批次 → 任务处理 → 异常处理。
@@ -117,6 +173,7 @@ const menuGroups = [
     title: '快速开票', icon: 'EditPen', children: [
       { title: '文字开票', path: '/invoice/text', icon: 'EditPen' },
       { title: '图片开票', path: '/invoice/image', icon: 'Picture' },
+      { title: '文档开票', path: '/invoice/document', icon: 'Document' },
     ]
   },
   {
@@ -163,6 +220,7 @@ onMounted(async () => {
       // ignore
     }
   }
+  await loadTenants()
 })
 </script>
 
@@ -240,6 +298,33 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 20px;
+
+  .tenant-switcher {
+    cursor: pointer;
+  }
+
+  .tenant-display {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #fff;
+    cursor: pointer;
+    padding: 4px 12px;
+    border-radius: 4px;
+    transition: background 0.2s;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .tenant-name {
+      font-size: 13px;
+      max-width: 120px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
 
   .message-badge {
     display: flex;

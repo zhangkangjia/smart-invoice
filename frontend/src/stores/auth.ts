@@ -49,6 +49,14 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  async function switchTenant(tenantId: string) {
+    const res = await authApi.switchTenant(tenantId)
+    setToken(res.access_token, res.refresh_token)
+    await fetchUserInfo()
+    // 切换后刷新页面，确保所有数据按新租户加载
+    window.location.reload()
+  }
+
   return {
     token,
     refreshToken,
@@ -58,6 +66,7 @@ export const useAuthStore = defineStore('auth', () => {
     login,
     logout,
     refresh,
-    fetchUserInfo
+    fetchUserInfo,
+    switchTenant
   }
 })

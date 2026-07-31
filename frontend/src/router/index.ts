@@ -63,6 +63,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '图片开票', icon: 'Picture' }
       },
       {
+        path: 'invoice/document',
+        name: 'InvoiceDocument',
+        component: () => import('@/views/invoice/InvoiceDocument.vue'),
+        meta: { title: '文档开票', icon: 'Document' }
+      },
+      {
         path: 'invoice/excel',
         redirect: '/invoice-batches',
         meta: { title: '批量开票', hidden: true }

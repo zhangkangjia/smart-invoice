@@ -18,7 +18,11 @@ async def get_current_user(
     db: AsyncSession = Depends(get_db),
     token: str = Depends(oauth2_scheme),
 ) -> User:
-    """从 JWT token 中解析当前用户。"""
+    """从 JWT token 中解析当前用户。
+
+    支持多租户切换：JWT 中若有 current_tenant_id（仅超管有），
+    则覆盖 user.tenant_id 作为当前操作租户。
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="无法验证凭据",
@@ -36,7 +40,19 @@ async def get_current_user(
     user = result.scalar_one_or_none()
     if user is None:
         raise credentials_exception
+
+    # 超管租户切换：如果 JWT 里有 current_tenant_id 且与用户原始 tenant 不同，
+    # 临时把 user.tenant_id 替换为 current_tenant_id（不持久化）
+    switched_tenant = payload.get("current_tenant_id")
+    if switched_tenant and user.is_super_admin and switched_tenant != user.tenant_id:
+        # 标记当前为切换后的租户（不改 DB）
+        object.__setattr__(user, "_switched_tenant_id", switched_tenant)
     return user
+
+
+def get_tenant_id(user: User) -> str:
+    """获取当前操作租户ID（支持超管切换后的租户）。"""
+    return getattr(user, "_switched_tenant_id", None) or user.tenant_id
 
 
 async def get_current_active_user(

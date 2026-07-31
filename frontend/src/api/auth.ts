@@ -28,3 +28,24 @@ export function getMe() {
 export function logout() {
   return request.post('/auth/logout')
 }
+
+export interface TenantItem {
+  id: string
+  name: string
+  code: string
+  status: string
+}
+
+export function listTenants() {
+  return request.get<unknown, { current_tenant_id: string; tenants: TenantItem[] }>('/auth/tenants')
+}
+
+export function switchTenant(tenantId: string) {
+  return request.post<unknown, {
+    access_token: string
+    refresh_token: string
+    token_type: string
+    current_tenant_id: string
+    current_tenant_name: string
+  }>('/auth/switch-tenant', { tenant_id: tenantId })
+}

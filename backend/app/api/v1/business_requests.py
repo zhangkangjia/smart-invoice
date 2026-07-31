@@ -714,6 +714,94 @@ async def submit_image(
     return await _build_detail_response(db, br, current_user.tenant_id)
 
 
+@router.post("/document", status_code=status.HTTP_201_CREATED, summary="Word/PDF文档提交开票")
+async def submit_document(
+    file: UploadFile = File(..., description="支持 .docx / .pdf / .txt"),
+    enterprise_id: str | None = Form(None, description="销方企业ID（可选，自动匹配）"),
+    external_order_no: str | None = Form(None),
+    customer_remark: str | None = Form(None),
+    urgency: str = Form("normal"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """上传 Word/PDF 文档方式智能开票。
+
+    流程：
+    1. 从文档中提取文本（docx 段落+表格 / pdf 全文+表格）
+    2. 走文字识别链路提取开票要素
+    3. 自动匹配销方企业（按文字中识别到的企业名称/税号）
+    4. 自动匹配客户抬头
+    5. 自动模拟开票
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="请上传文件")
+    lower = file.filename.lower()
+    if not lower.endswith((".docx", ".pdf", ".txt")):
+        raise HTTPException(status_code=400, detail="仅支持 .docx / .pdf / .txt 格式")
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="文件为空")
+
+    # 1. 提取文档文本
+    from app.services.document_parser import extract_text_from_document
+    try:
+        content = extract_text_from_document(file_bytes, file.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not content or len(content.strip()) < 5:
+        raise HTTPException(status_code=400, detail="文档内容为空，请检查文件")
+
+    # 2. 自动匹配销方企业
+    enterprise_id = await _resolve_enterprise_id(
+        db=db,
+        tenant_id=current_user.tenant_id,
+        enterprise_id=enterprise_id,
+        hint_text=content,
+    )
+
+    # 3. 创建业务申请并自动处理（走文字识别链路）
+    br = await _create_business_request(
+        db,
+        tenant_id=current_user.tenant_id,
+        enterprise_id=enterprise_id,
+        source_type="document",
+        current_user=current_user,
+        content=content[:5000],
+        external_order_no=external_order_no,
+        customer_remark=customer_remark,
+        urgency=urgency,
+    )
+
+    # 保存原始文档到 MinIO（可选）
+    try:
+        from app.services.storage_service import upload_file
+        file_key = f"documents/{br.id}/{file.filename}"
+        await upload_file(
+            tenant_id=current_user.tenant_id,
+            file_key=file_key,
+            file_data=file_bytes,
+            content_type=file.content_type or "application/octet-stream",
+        )
+        # 记录来源文档
+        db.add(SourceDocument(
+            tenant_id=current_user.tenant_id,
+            business_request_id=br.id,
+            doc_type="document",
+            file_key=file_key,
+            file_name=file.filename,
+            file_size=len(file_bytes),
+            mime_type=file.content_type or "application/octet-stream",
+        ))
+    except Exception as storage_err:
+        logger.warning("文档保存到存储失败（不影响开票）: %s", storage_err)
+
+    await _auto_process_request(db, br, content=content, current_user=current_user)
+    await db.refresh(br)
+    return await _build_detail_response(db, br, current_user.tenant_id)
+
+
 @router.post("/excel", status_code=status.HTTP_201_CREATED, summary="Excel批量智能开票")
 async def submit_excel(
     file: UploadFile = File(...),

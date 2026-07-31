@@ -156,8 +156,8 @@ case $ACTION in
         pull_code
         log_step "清除后端依赖缓存..."
         docker volume rm smart-invoice_si-backend-venv 2>/dev/null || true
-        log_step "清除前端依赖缓存..."
-        docker volume rm smart-invoice_si-frontend-node-modules 2>/dev/null || true
+        log_step "重新构建前端镜像..."
+        $COMPOSE_CMD build --no-cache frontend
         start_services
         wait_for_ready
         show_status

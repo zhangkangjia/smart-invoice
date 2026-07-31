@@ -73,18 +73,23 @@ async def wecom_oauth_login(
                 user.wecom_userid = userid
                 await db.commit()
 
-    if user is None or not user.is_active:
+    if user is None or user.status != "active":
         raise HTTPException(
             status_code=403,
             detail="该企业微信账号未绑定系统用户，请联系管理员",
         )
 
     # 4. 颁发 JWT
-    access_token = create_access_token(
-        data={"sub": user.id, "tenant_id": user.tenant_id, "role": user.role}
-    )
+    from app.core.deps import _get_user_role_codes
+    role_codes = await _get_user_role_codes(db, user.id)
+    extra_claims = {
+        "tenant_id": user.tenant_id,
+        "username": user.username,
+        "roles": role_codes,
+    }
+    access_token = create_access_token(subject=user.id, extra_claims=extra_claims)
 
-    # 5. 重定向到前端（带上 token）
+    # 5. 返回前端跳转信息
     frontend_base = settings.FRONTEND_BASE_URL.rstrip("/")
     return {
         "access_token": access_token,
@@ -92,8 +97,8 @@ async def wecom_oauth_login(
         "user": {
             "id": user.id,
             "username": user.username,
-            "real_name": user.real_name,
-            "role": user.role,
+            "full_name": user.full_name,
+            "is_super_admin": user.is_super_admin,
             "tenant_id": user.tenant_id,
         },
         "redirect": f"{frontend_base}{redirect}",
@@ -241,6 +246,28 @@ async def status():
         "wecom_agent_id": wecom_service.agent_id if wecom_service.enabled else "",
         "frontend_base_url": settings.FRONTEND_BASE_URL,
     }
+
+
+@router.get("/wecom/test", summary="测试企业微信连通性")
+async def test_wecom():
+    """测试企业微信 access_token 是否能正常获取。
+
+    返回:
+    - ok=true: 配置正确，可正常使用
+    - ok=false: 配置错误，详见 error
+    """
+    if not wecom_service.enabled:
+        return {"ok": False, "error": "企业微信未配置 (WECOM_CORP_ID/WECOM_SECRET 为空)"}
+    try:
+        token = await wecom_service.get_access_token()
+        return {
+            "ok": True,
+            "access_token_prefix": token[:20] + "...",
+            "corp_id": wecom_service.corp_id,
+            "agent_id": wecom_service.agent_id,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @router.get("/wecom/department-users", summary="企业微信部门成员")

@@ -36,6 +36,21 @@ async def init_database() -> None:
     """创建所有表并初始化默认角色和超级管理员。"""
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # 兼容旧库：给 users 表补 wecom_userid 字段（create_all 不会改已有表）
+        from sqlalchemy import text
+        try:
+            await conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS wecom_userid VARCHAR(100)"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS wecom_bound_at TIMESTAMPTZ"
+            ))
+            # 建索引（如果不存在）
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_users_wecom_userid ON users (wecom_userid)"
+            ))
+        except Exception as e:
+            logger.warning("补充 wecom_userid 字段失败（可忽略）: %s", e)
     logger.info("数据库表已创建")
 
     async with AsyncSessionLocal() as db:

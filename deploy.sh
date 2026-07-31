@@ -40,60 +40,55 @@ pull_code() {
     local branch=$(git rev-parse --abbrev-ref HEAD)
     log_info "当前分支: $branch"
 
-    # 设置 git 超时（10秒内没数据就放弃）
-    export GIT_HTTP_LOW_SPEED_LIMIT=1000
-    export GIT_HTTP_LOW_SPEED_TIME=10
-    export GIT_SSH_COMMAND="ssh -o ConnectTimeout=10 -o ServerAliveInterval=5"
-
+    # 检测远程协议
+    local remote_url=$(git remote get-url origin)
     local max_retry=3 retry=0
 
     while [ $retry -lt $max_retry ]; do
         retry=$((retry + 1))
-        log_info "拉取代码中... (第 $retry/$max_retry 次, 超时30秒)"
+        log_info "拉取代码中... (第 $retry/$max_retry 次)"
 
-        # 用 timeout 命令确保不会卡死
-        if timeout 30 git fetch origin 2>/dev/null; then
+        if git fetch origin 2>/dev/null; then
             git reset --hard origin/"$branch"
             log_info "代码已更新"
             git log --oneline -3
             return 0
         fi
 
-        log_warn "拉取失败或超时"
-
-        # 检测 GITEE 镜像（优先用 Gitee，国内最稳定）
-        local remote_url=$(git remote get-url origin)
-        if echo "$remote_url" | grep -q "github.com"; then
-            log_warn "GitHub 不稳定，尝试切换到 Gitee 镜像..."
-            local repo_path=$(echo "$remote_url" | sed -E 's|.*github\.com[:/]||; s|\.git$||')
-            local gitee_url="https://gitee.com/${repo_path}.git"
-            log_info "尝试: $gitee_url"
-            if timeout 20 git ls-remote "$gitee_url" HEAD >/dev/null 2>&1; then
-                git remote set-url origin "$gitee_url"
-                log_info "已切换为 Gitee: $gitee_url"
-                retry=0
-                continue
-            else
-                log_warn "Gitee 镜像不可用或未配置"
-            fi
+        log_warn "拉取失败，可能网络问题"
+        # 如果是 https 且失败，尝试切换到 ssh
+        if echo "$remote_url" | grep -q "^https://"; then
+            log_warn "检测到 HTTPS 协议，尝试切换为 SSH..."
+            ssh_url=$(echo "$remote_url" | sed 's|https://github.com/|git@github.com:|')
+            git remote set-url origin "$ssh_url"
+            log_info "已切换为: $ssh_url"
+            # 切换后重试计数归零
+            retry=0
+            remote_url=$(git remote get-url origin)
+            sleep 2
+            continue
         fi
 
-        sleep 2
+        # 如果是 ssh 且失败，尝试切换到 https
+        if echo "$remote_url" | grep -q "^git@github.com:"; then
+            log_warn "检测到 SSH 协议，尝试切换为 HTTPS..."
+            https_url=$(echo "$remote_url" | sed 's|git@github.com:|https://github.com/|')
+            git remote set-url origin "$https_url"
+            log_info "已切换为: $https_url"
+            retry=0
+            remote_url=$(git remote get-url origin)
+            sleep 2
+            continue
+        fi
+
+        sleep 3
     done
 
-    log_error "拉取代码失败（GitHub不稳定）"
-    log_error ""
-    log_error "解决方案："
-    log_error "  1. 用 Gitee 镜像（推荐）："
-    log_error "     a. 在 https://gitee.com/projects/import/url 导入 GitHub 仓库"
-    log_error "     b. 手动切换: git remote set-url origin https://gitee.com/你的用户名/smart-invoice.git"
-    log_error "     c. 重新执行: ./deploy.sh"
-    log_error ""
-    log_error "  2. 手动拉取（直接 Ctrl+C 后操作）:"
-    log_error "     git fetch origin && git reset --hard origin/main"
-    log_error ""
-    log_error "  3. 跳过代码更新，直接启动已有代码:"
-    log_error "     ./deploy.sh restart"
+    log_error "拉取代码失败，已重试 $max_retry 次"
+    log_error "请检查："
+    log_error "  1. 服务器是否能访问 GitHub（国内服务器可能需要代理）"
+    log_error "  2. SSH key 是否已添加到 GitHub"
+    log_error "  3. 手动执行: git fetch origin 查看详细错误"
     exit 1
 }
 

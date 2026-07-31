@@ -105,7 +105,7 @@ services:
       dockerfile: Dockerfile
     container_name: si-backend
     restart: unless-stopped
-    command: ["sh", "-c", "if [ ! -f /app/venv/bin/uvicorn ]; then python -m venv /app/venv && /app/venv/bin/pip install -i https://mirrors.cloud.tencent.com/pypi/simple/ -r /app/requirements.txt; fi && /app/venv/bin/python -m app.db.init_db && /app/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    command: ["sh", "-c", "if [ ! -f /app/venv/bin/uvicorn ]; then python -m venv /app/venv && /app/venv/bin/pip install -i https://mirrors.cloud.tencent.com/pypi/simple/ -r /app/requirements.txt; fi && /app/venv/bin/python -m app.db.init_db && /app/venv/bin/python -m app.db.seed_demo && /app/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000"]
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-smartinvoice}:${POSTGRES_PASSWORD:-smartinvoice123}@postgres:5432/${POSTGRES_DB:-smart_invoice}
       DATABASE_SYNC_URL: postgresql+psycopg2://${POSTGRES_USER:-smartinvoice}:${POSTGRES_PASSWORD:-smartinvoice123}@postgres:5432/${POSTGRES_DB:-smart_invoice}

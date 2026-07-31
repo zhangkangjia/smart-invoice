@@ -39,10 +39,57 @@ pull_code() {
     log_step "拉取最新代码..."
     local branch=$(git rev-parse --abbrev-ref HEAD)
     log_info "当前分支: $branch"
-    git fetch origin
-    git reset --hard origin/"$branch"
-    log_info "代码已更新"
-    git log --oneline -3
+
+    # 检测远程协议
+    local remote_url=$(git remote get-url origin)
+    local max_retry=3 retry=0
+
+    while [ $retry -lt $max_retry ]; do
+        retry=$((retry + 1))
+        log_info "拉取代码中... (第 $retry/$max_retry 次)"
+
+        if git fetch origin 2>/dev/null; then
+            git reset --hard origin/"$branch"
+            log_info "代码已更新"
+            git log --oneline -3
+            return 0
+        fi
+
+        log_warn "拉取失败，可能网络问题"
+        # 如果是 https 且失败，尝试切换到 ssh
+        if echo "$remote_url" | grep -q "^https://"; then
+            log_warn "检测到 HTTPS 协议，尝试切换为 SSH..."
+            ssh_url=$(echo "$remote_url" | sed 's|https://github.com/|git@github.com:|')
+            git remote set-url origin "$ssh_url"
+            log_info "已切换为: $ssh_url"
+            # 切换后重试计数归零
+            retry=0
+            remote_url=$(git remote get-url origin)
+            sleep 2
+            continue
+        fi
+
+        # 如果是 ssh 且失败，尝试切换到 https
+        if echo "$remote_url" | grep -q "^git@github.com:"; then
+            log_warn "检测到 SSH 协议，尝试切换为 HTTPS..."
+            https_url=$(echo "$remote_url" | sed 's|git@github.com:|https://github.com/|')
+            git remote set-url origin "$https_url"
+            log_info "已切换为: $https_url"
+            retry=0
+            remote_url=$(git remote get-url origin)
+            sleep 2
+            continue
+        fi
+
+        sleep 3
+    done
+
+    log_error "拉取代码失败，已重试 $max_retry 次"
+    log_error "请检查："
+    log_error "  1. 服务器是否能访问 GitHub（国内服务器可能需要代理）"
+    log_error "  2. SSH key 是否已添加到 GitHub"
+    log_error "  3. 手动执行: git fetch origin 查看详细错误"
+    exit 1
 }
 
 start_services() {
@@ -92,8 +139,9 @@ echo ""
 
 case $ACTION in
     pull|"")
-        stop_services
+        # 先拉代码，成功后再停服务（避免停了服务但代码拉不下来）
         pull_code
+        stop_services
         start_services
         wait_for_ready
         show_status

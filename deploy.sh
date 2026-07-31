@@ -2,11 +2,11 @@
 #=============================================================
 # 智能开票平台 - 一键部署脚本
 # 用法:
-#   ./deploy.sh          - 全流程：停止→拉代码→构建→启动→健康检查
-#   ./deploy.sh pull     - 同上（默认）
-#   ./deploy.sh restart  - 仅重启
+#   ./deploy.sh          - 全流程：停止→拉代码→启动（日常更新用）
+#   ./deploy.sh restart  - 仅重启容器（不拉代码，最快）
+#   ./deploy.sh rebuild  - 清除依赖缓存重新安装（改了requirements.txt用）
 #   ./deploy.sh stop     - 停止所有服务
-#   ./deploy.sh logs     - 查看日志
+#   ./deploy.sh logs     - 查看日志（可指定服务名）
 #   ./deploy.sh status   - 查看状态
 #=============================================================
 set -e
@@ -45,19 +45,20 @@ pull_code() {
     git log --oneline -3
 }
 
-build_and_start() {
-    log_step "启动服务（使用缓存镜像）..."
+start_services() {
+    log_step "启动服务..."
     $COMPOSE_CMD up -d
     log_info "服务已启动"
 }
 
-wait_for_healthy() {
+wait_for_ready() {
     log_step "等待服务启动..."
-    local max_wait=120 waited=0
+    local max_wait=180 waited=0
     while [ $waited -lt $max_wait ]; do
-        local unhealthy=$($COMPOSE_CMD ps 2>/dev/null | grep -c "unhealthy" || true)
-        local starting=$($COMPOSE_CMD ps 2>/dev/null | grep -cE "(starting|created)" || true)
-        if [ "$unhealthy" -eq 0 ] && [ "$starting" -eq 0 ]; then
+        local containers=$($COMPOSE_CMD ps -q 2>/dev/null | wc -l)
+        local running=$($COMPOSE_CMD ps --filter "status=running" -q 2>/dev/null | wc -l)
+        if [ "$containers" -gt 0 ] && [ "$containers" -eq "$running" ]; then
+            sleep 3
             log_info "所有服务已就绪"
             return 0
         fi
@@ -79,10 +80,6 @@ show_status() {
     echo -e "  ${CYAN}MinIO${NC}:      http://localhost:9001      (smartinvoice/smartinvoice123)"
 }
 
-show_logs() {
-    $COMPOSE_CMD logs -f --tail=100 ${2:-}
-}
-
 #====================== 主流程 ======================#
 ACTION=${1:-pull}
 
@@ -97,40 +94,44 @@ case $ACTION in
     pull|"")
         stop_services
         pull_code
-        build_and_start
-        wait_for_healthy
-        show_status
-        ;;
-    build)
-        stop_services
-        pull_code
-        log_step "重新构建镜像..."
-        $COMPOSE_CMD build --no-cache
-        $COMPOSE_CMD up -d
-        wait_for_healthy
+        start_services
+        wait_for_ready
         show_status
         ;;
     restart)
         $COMPOSE_CMD restart
-        wait_for_healthy
+        wait_for_ready
         show_status
+        ;;
+    rebuild)
+        stop_services
+        pull_code
+        log_step "清除后端依赖缓存..."
+        docker volume rm smart-invoice_si-backend-venv 2>/dev/null || true
+        log_step "清除前端依赖缓存..."
+        docker volume rm smart-invoice_si-frontend-node-modules 2>/dev/null || true
+        start_services
+        wait_for_ready
+        show_status
+        log_warn "首次启动需安装依赖，请耐心等待1-2分钟"
         ;;
     stop)
         stop_services
         ;;
     logs)
-        show_logs "$@"
+        $COMPOSE_CMD logs -f --tail=100 ${2:-}
         ;;
     status)
         show_status
         ;;
     *)
-        echo "用法: $0 [pull|build|restart|stop|logs [service]|status]"
-        echo "  不带参数 = 停止→拉代码→启动（日常更新用，快）"
-        echo "  build   = 停止→拉代码→重新构建镜像→启动（改了Dockerfile用）"
-        echo "  restart = 仅重启容器"
-        echo "  stop    = 停止所有服务"
-        echo "  logs    = 查看日志"
+        echo "用法: $0 [pull|restart|rebuild|stop|logs [service]|status]"
+        echo ""
+        echo "  pull    - 停止→拉代码→启动（日常更新，秒级）"
+        echo "  restart - 仅重启容器（不拉代码，最快）"
+        echo "  rebuild - 清除依赖缓存重新安装（改了requirements.txt用）"
+        echo "  stop    - 停止所有服务"
+        echo "  logs    - 查看日志"
         echo "  status  = 查看状态"
         exit 1
         ;;

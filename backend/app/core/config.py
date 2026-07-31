@@ -74,6 +74,19 @@ class Settings(BaseSettings):
     DEFAULT_ADMIN_PASSWORD: str = "admin123456"
     DEFAULT_ADMIN_EMAIL: str = "admin@smart-invoice.local"
 
+    # --- 微信服务号 / 企业微信 ---
+    # 服务号（客户开票入口）
+    WECHAT_APP_ID: str = ""
+    WECHAT_APP_SECRET: str = ""
+    WECHAT_TOKEN: str = ""            # 公众号后台配置的Token
+    WECHAT_AES_KEY: str = ""          # 公众号后台配置的EncodingAESKey
+    # 企业微信（内部通知）
+    WECOM_CORP_ID: str = ""
+    WECOM_AGENT_ID: str = ""
+    WECOM_SECRET: str = ""
+    # 前端基础URL（用于生成开票提交链接）
+    FRONTEND_BASE_URL: str = "http://localhost:3000"
+
 
 @lru_cache
 def get_settings() -> Settings:

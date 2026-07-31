@@ -370,6 +370,22 @@ async def _execute_invoice(
             after={"status": "failed", "error": task.last_error},
         )
 
+    # 推送企业微信通知（异步，不阻塞主流程）
+    try:
+        from app.services.wechat_service import wecom_service
+        if wecom_service.enabled:
+            amount_str = str(invoice_request.total_with_tax) if invoice_request.total_with_tax else "—"
+            await wecom_service.notify_invoice_result(
+                user_ids="@all",
+                enterprise_name=enterprise.name,
+                invoice_number=result.channel_business_no if 'result' in dir() else "",
+                amount=amount_str,
+                status=task.status,
+                error_msg=task.last_error or "",
+            )
+    except Exception as notify_err:
+        logger.warning("企业微信通知发送失败: %s", notify_err)
+
 
 # --------------------------------------------------------------------------- #
 # API 路由

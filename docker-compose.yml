@@ -116,6 +116,16 @@ services:
       DEFAULT_ADMIN_USERNAME: admin
       DEFAULT_ADMIN_PASSWORD: admin123456
       DEFAULT_ADMIN_EMAIL: admin@smart-invoice.local
+      # 微信服务号（客户开票入口）
+      WECHAT_APP_ID: ${WECHAT_APP_ID:-}
+      WECHAT_APP_SECRET: ${WECHAT_APP_SECRET:-}
+      WECHAT_TOKEN: ${WECHAT_TOKEN:-}
+      WECHAT_AES_KEY: ${WECHAT_AES_KEY:-}
+      # 企业微信（内部通知）
+      WECOM_CORP_ID: ${WECOM_CORP_ID:-}
+      WECOM_AGENT_ID: ${WECOM_AGENT_ID:-}
+      WECOM_SECRET: ${WECOM_SECRET:-}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:3000}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:

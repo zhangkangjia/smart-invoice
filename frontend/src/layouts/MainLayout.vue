@@ -196,7 +196,8 @@ const menuGroups = [
       { title: '客户提交链接', path: '/submission-links', icon: 'Link' },
       { title: '通道配置', path: '/channels', icon: 'Connection' },
       { title: '机构与人员', path: '/settings/organizations', icon: 'Share' },
-      { title: '用户权限', path: '/settings/users', icon: 'User' },
+      { title: '用户管理', path: '/settings/users', icon: 'User' },
+      { title: '角色管理', path: '/settings/roles', icon: 'UserFilled' },
       { title: '审计日志', path: '/audit-logs', icon: 'DocumentChecked' },
     ]
   },

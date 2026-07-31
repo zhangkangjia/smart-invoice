@@ -58,3 +58,19 @@ export function lookupByTaxNo(taxNo: string) {
     message: string
   }>('/enterprises/lookup/by-tax-no', { params: { tax_no: taxNo } })
 }
+
+export function downloadEnterpriseTemplate() {
+  return request.get<unknown, Blob>('/enterprises/template/download', { responseType: 'blob' })
+}
+
+export function importEnterprises(file: File) {
+  const formData = new FormData()
+  formData.append('file', file)
+  return request.post<unknown, {
+    total: number
+    created: number
+    updated: number
+    skipped: number
+    errors: Array<{ row: number; error: string }>
+  }>('/enterprises/import', formData)
+}

@@ -1,8 +1,11 @@
 """企业管理路由。"""
 
 import uuid
+from datetime import datetime, timezone
+from io import BytesIO
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -134,6 +137,169 @@ async def lookup_by_tax_no(
     # 3. 百望云未配置或查询失败
     result_data["message"] = "未配置百望云通道或查询失败，请手动填写企业信息"
     return result_data
+
+
+@router.get("/template/download", summary="下载企业导入模板")
+async def download_template(
+    current_user: User = Depends(get_current_active_user),
+):
+    """下载企业批量导入 Excel 模板。"""
+    import openpyxl
+    from urllib.parse import quote
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "企业导入模板"
+
+    # 表头
+    headers = [
+        "企业名称(必填)", "税号(必填)", "地址", "电话",
+        "开户银行", "银行账号", "状态(填active或留空)",
+    ]
+    ws.append(headers)
+
+    # 示例行
+    ws.append([
+        "杭州两心同网络科技有限公司",
+        "91330106MA28T1234X",
+        "浙江省杭州市西湖区文三路478号",
+        "13800138000",
+        "中国工商银行杭州西湖支行",
+        "1202020809000123456",
+        "active",
+    ])
+
+    # 列宽
+    widths = [32, 22, 40, 16, 28, 24, 14]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+    # 说明行
+    ws.append([])
+    ws.append(["说明:"])
+    ws.append(["1. 企业名称和税号为必填，其余可选"])
+    ws.append(["2. 状态留空默认为 active（启用），可填 active/pending/suspended"])
+    ws.append(["3. 税号重复的行将自动跳过（按已有税号更新）"])
+    ws.append(["4. 税号格式：15-20位字母数字"])
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = "企业导入模板.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"
+        },
+    )
+
+
+@router.post("/import", summary="批量导入企业")
+async def import_enterprises(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """通过 Excel 批量导入企业。
+
+    模板列: 企业名称 | 税号 | 地址 | 电话 | 开户银行 | 银行账号 | 状态
+    - 税号已存在则更新，不存在则新增
+    - 返回成功/失败/跳过数量及错误明细
+    """
+    import openpyxl
+
+    if not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="请上传 Excel 文件(.xlsx)")
+
+    content = await file.read()
+    try:
+        wb = openpyxl.load_workbook(BytesIO(content), data_only=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Excel 文件解析失败: {e}")
+
+    ws = wb.active
+
+    # 读取所有行（跳过表头）
+    rows = list(ws.iter_rows(min_row=2, values_only=True))
+
+    success_count = 0
+    update_count = 0
+    skip_count = 0
+    errors: list[dict] = []
+
+    for idx, row in enumerate(rows, start=2):
+        # 跳过空行
+        if not row or all(cell is None or str(cell).strip() == "" for cell in row):
+            skip_count += 1
+            continue
+
+        name = str(row[0]).strip() if row[0] else ""
+        tax_no = str(row[1]).strip().upper() if row[1] else ""
+
+        if not name:
+            errors.append({"row": idx, "error": "企业名称为空"})
+            continue
+        if not tax_no:
+            errors.append({"row": idx, "error": "税号为空"})
+            continue
+
+        address = str(row[2]).strip() if len(row) > 2 and row[2] else None
+        phone = str(row[3]).strip() if len(row) > 3 and row[3] else None
+        bank_name = str(row[4]).strip() if len(row) > 4 and row[4] else None
+        bank_account = str(row[5]).strip() if len(row) > 5 and row[5] else None
+        ent_status = str(row[6]).strip().lower() if len(row) > 6 and row[6] else "active"
+
+        if ent_status not in ("active", "pending", "suspended", "archived"):
+            ent_status = "active"
+
+        # 查是否已存在
+        existing = await db.execute(
+            select(Enterprise).where(
+                Enterprise.tenant_id == current_user.tenant_id,
+                Enterprise.tax_no == tax_no,
+            )
+        )
+        existing_ent = existing.scalar_one_or_none()
+
+        if existing_ent:
+            # 更新
+            existing_ent.name = name
+            if address: existing_ent.address = address
+            if phone: existing_ent.phone = phone
+            if bank_name: existing_ent.bank_name = bank_name
+            if bank_account: existing_ent.bank_account = bank_account
+            existing_ent.status = ent_status
+            update_count += 1
+        else:
+            # 新增
+            enterprise = Enterprise(
+                tenant_id=current_user.tenant_id,
+                name=name,
+                tax_no=tax_no,
+                address=address,
+                phone=phone,
+                bank_name=bank_name,
+                bank_account=bank_account,
+                status=ent_status,
+            )
+            db.add(enterprise)
+            success_count += 1
+
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"数据库保存失败: {e}")
+
+    return {
+        "total": len(rows),
+        "created": success_count,
+        "updated": update_count,
+        "skipped": skip_count,
+        "errors": errors,
+    }
 
 
 @router.post("", response_model=EnterpriseResponse, status_code=status.HTTP_201_CREATED, summary="创建企业")
